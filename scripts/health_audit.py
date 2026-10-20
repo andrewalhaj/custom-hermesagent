@@ -49,7 +49,8 @@ MEMORY_MD = os.path.expanduser("~/.hermes/memories/MEMORY.md")
 USER_MD = os.path.expanduser("~/.hermes/memories/USER.md")
 WHOAMI_SCRIPT = os.path.join(os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"), "scripts", "whoami-live.sh")  # optional: not published
 HERMES_BIN = os.path.expanduser("~/.local/bin/hermes")
-GIT_REPO = "/usr/local/lib/hermes-agent"
+HERMES_VENV = os.environ.get("HERMES_VENV") or "/usr/local/lib/hermes-agent/venv"
+GIT_REPO = os.path.dirname(HERMES_VENV)
 CODEGRAPH_DB = os.path.join(GIT_REPO, ".codegraph", "codegraph.db")
 
 MEMORY_CAP = 3000
@@ -487,9 +488,8 @@ def probe_cron():
     active_count = len(re.findall(r"\[active\]", stdout))
     if active_count > 0:
         sys.path.insert(0, SCRIPTS_DIR)
-        from infra_watchdog import cron_health  # same last_status rule the hourly watchdog alerts on
-        with open(os.path.expanduser("~/.hermes/cron/jobs.json")) as f:
-            bad = cron_health(json.load(f).get("jobs", []))
+        import cron_health  # same last_status rule the hourly watchdog alerts on
+        bad = cron_health.alerts(cron_health.load_jobs())
         if bad:
             return "FAIL", f"{active_count} active; " + "; ".join(bad)[:400]
         return "PASS", f"{active_count} active jobs, all last runs ok"

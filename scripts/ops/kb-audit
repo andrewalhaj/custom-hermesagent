@@ -3,5 +3,5 @@
 # from the environment, default all off). Exit 1 on any failure. Rigorous run: knowledge/eval_v2.
 set -uo pipefail
 cd "$HOME/.hermes/scripts" || exit 1
-PY=/usr/local/lib/hermes-agent/venv/bin/python
+PY="${HERMES_VENV:-/usr/local/lib/hermes-agent/venv}/bin/python"
 "$PY" knowledge.py status && "$PY" kbench.py eval

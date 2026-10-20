@@ -13,17 +13,17 @@ or COOLDOWN_MIN has elapsed, so a multi-hour outage nags hourly, not every 15 mi
 Exit 0 ALWAYS when the job ran (alerts are delivered via stdout, which the no_agent
 cron sends verbatim). The exit code means "did the job run", not "did it find issues".
 """
-import json, os, re, sys, time, subprocess, urllib.request
+import glob, json, os, re, socket, sys, time, subprocess, urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hermes_env import require
+import cron_health
+from hermes_env import HERMES_HOME, env
 
 HERMES = os.path.expanduser("~/.hermes")
 STATE = "/tmp/infra_watchdog_state.json"
 COOLDOWN_MIN = 60
-P0, P1 = [], []   # alertable buckets
 
 def sh(cmd, timeout=12):
     try:
@@ -57,234 +57,235 @@ def signature(msgs):
     # digits stripped: "disk 91%" → "disk 92%" is the same failure, so the cooldown holds
     return "|".join(sorted(re.sub(r"\d+", "#", m) for m in msgs))
 
-def cron_health(jobs, now=None):
-    """One alert per enabled job whose last run was not ok (error, timeout, delivery_failed...)."""
-    now, alerts = now or datetime.now(timezone.utc), []
-    for job in jobs:
-        name, st = job["name"], job.get("last_status")
-        if not job.get("enabled", True) or name.startswith("Infra Watchdog"):
-            continue   # skip self — prevents cascading false alarms
-        if st not in (None, "ok"):
-            why = job.get("last_error") or job.get("last_delivery_error") or ""
-            alerts.append(f"Cron '{name}': last run {st}" + (f": {why[:120]}" if why else ""))
-        elif st is None and job.get("last_run_at") is None and job.get("next_run_at"):
-            dt = datetime.fromisoformat(job["next_run_at"])
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            if dt < now - timedelta(hours=2):
-                alerts.append(f"Cron '{name}': scheduled but never executed")
-    return alerts
+def _missing(key):
+    return f"{key} is not set: export it or add {key}=... to {HERMES_HOME / '.env'}"
 
 
-def main():
-    # resolved here, not at import: a missing var must not kill importers (tests, health_audit)
-    VPS_A_HOST = require("VPS_A_HOST")
+# Each check returns its P1 findings (message strings); main() concatenates them in order.
+
+def check_wall_dash(url):
     # wall-dash nginx binds the Tailscale interface, not the public IP — probe the tailnet addr
-    WALL_DASH_URL = require("WALL_DASH_URL")
-    # ── 1. backup nginx :5051 ─────────────────────────────────────────────
-    if http_code(WALL_DASH_URL) != 200:
-        P1.append(f"wall-dash nginx :5051 unreachable on the backup host")
+    if not url:
+        return [_missing("WALL_DASH_URL")]
+    if http_code(url) != 200:
+        return ["wall-dash nginx :5051 unreachable on the backup host"]
+    return []
 
-    # ── 2. gateway (user-scoped systemd) ───────────────────────────────────
+def check_gateway():
     rc, out, _ = sh("XDG_RUNTIME_DIR=/run/user/0 systemctl --user is-active hermes-gateway.service")
-    if out != "active":
-        P1.append(f"Hermes gateway not active (state={out or 'unknown'})")
+    return [f"Hermes gateway not active (state={out or 'unknown'})"] if out != "active" else []
 
-    # ── 2a. dispatcher (system-scoped) — moved from memory-drift-watchdog.sh (step 7.3) ──
+def check_dispatcher():
+    # moved from memory-drift-watchdog.sh (step 7.3)
     rc, out, _ = sh("systemctl is-active hermes-dispatcher.service")
     if out != "active":
-        P1.append(f"hermes-dispatcher not active (state={out or 'unknown'}) — webhooks/kanban dispatch down")
+        return [f"hermes-dispatcher not active (state={out or 'unknown'}) — webhooks/kanban dispatch down"]
+    return []
 
-    # ── 2b. KB warm-search daemon — SOCKET probe, not unit state ───────────
-    # The unit can be "active" while the socket file is orphaned/deleted (proven
-    # 2026-06-18: clients silently fall back to the ~8s cold path). So probe the
-    # socket with a real connect(). Pure-acceleration service: a clean auto-restart
-    # is SILENT (self-healed); only a FAILED restart escalates to P1.
-    def _kb_sock_ok():
-        import socket as _s
-        try:
-            _c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
-            _c.settimeout(3)
-            _c.connect(f"{HERMES}/run/kb.sock")
-            _c.close()
-            return True
-        except Exception:
-            return False
-    if not _kb_sock_ok():
-        sh("XDG_RUNTIME_DIR=/run/user/0 systemctl --user restart hermes-kb-daemon.service")
-        import time as _t; _t.sleep(10)
-        if not _kb_sock_ok():
-            rc2, out2, _ = sh("XDG_RUNTIME_DIR=/run/user/0 systemctl --user is-active hermes-kb-daemon.service")
-            P1.append(f"KB warm-search daemon socket dead and auto-restart FAILED (unit={out2 or 'unknown'}) — knowledge.py search degraded to ~8s cold-start")
+def _kb_sock_ok():
+    try:
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.settimeout(3)
+        c.connect(f"{HERMES}/run/kb.sock")
+        c.close()
+        return True
+    except Exception:
+        return False
 
-    # ── 3. disk on both hosts (>90% = P1) ──────────────────────────────────
+def check_kb_daemon():
+    # SOCKET probe, not unit state: the unit can be "active" while the socket file is
+    # orphaned/deleted (proven 2026-06-18: clients silently fall back to the ~8s cold path).
+    # Pure-acceleration service: a clean auto-restart is SILENT (self-healed); only a
+    # FAILED restart escalates to P1.
+    if _kb_sock_ok():
+        return []
+    sh("XDG_RUNTIME_DIR=/run/user/0 systemctl --user restart hermes-kb-daemon.service")
+    time.sleep(10)
+    if _kb_sock_ok():
+        return []
+    rc, out, _ = sh("XDG_RUNTIME_DIR=/run/user/0 systemctl --user is-active hermes-kb-daemon.service")
+    return [f"KB warm-search daemon socket dead and auto-restart FAILED (unit={out or 'unknown'}) — knowledge.py search degraded to ~8s cold-start"]
+
+def check_disks(vps_a_host):
+    """>90% on either host = P1."""
+    found = []
     rc, out, _ = sh("df -P / | awk 'NR==2{gsub(\"%\",\"\",$5); print $5}'")
     if out.isdigit() and int(out) > 90:
-        P1.append(f"Primary disk {out}% full")
-    rc, out, _ = sh(f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@{VPS_A_HOST} "
+        found.append(f"Primary disk {out}% full")
+    if not vps_a_host:
+        return found + [_missing("VPS_A_HOST")]
+    rc, out, _ = sh(f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@{vps_a_host} "
                     f"\"df -P / | awk 'NR==2{{gsub(\\\"%\\\",\\\"\\\",\\$5); print \\$5}}'\"", timeout=20)
     if rc != 0 or not out.isdigit():
-        P1.append(f"Backup host ({VPS_A_HOST}) unreachable — disk probe failed (rc={rc})")
+        found.append(f"Backup host ({vps_a_host}) unreachable — disk probe failed (rc={rc})")
     elif int(out) > 90:
-        P1.append(f"Backup host ({VPS_A_HOST}) disk {out}% full")
+        found.append(f"Backup host ({vps_a_host}) disk {out}% full")
+    return found
 
-    # ── 4. cron job health ─────────────────────────────────────────────
+def check_cron():
     try:
-        with open(f"{HERMES}/cron/jobs.json") as f:
-            P1.extend(cron_health(json.load(f).get("jobs", [])))
+        return cron_health.alerts(cron_health.load_jobs(f"{HERMES}/cron/jobs.json"))
     except Exception as e:
-        P1.append(f"Cron DB unreadable: {e}")
+        return [f"Cron DB unreadable: {e}"]
 
-    # ── 6. Delegation health (outcome-based) ──────────────────────────────
+def check_delegation():
     # Delegation authenticates through the OAuth credential pool in auth.json,
     # NOT delegation.api_key in config.yaml (that literal is stale and unused).
     # Probing a key the adapter never uses produced false P1s, so this checks the
     # only real evidence: the final status lines of recent subagent transcripts.
     try:
-        import glob as _glob, re as _re
-        _logs = sorted(_glob.glob(f"{HERMES}/cache/delegation/live/*/task-*.log"),
-                       key=os.path.getmtime, reverse=True)
-        _recent = [p for p in _logs if time.time() - os.path.getmtime(p) < 24 * 3600]
-        _ok = _bad = 0
-        for _p in _recent[:40]:
+        logs = sorted(glob.glob(f"{HERMES}/cache/delegation/live/*/task-*.log"),
+                      key=os.path.getmtime, reverse=True)
+        recent = [p for p in logs if time.time() - os.path.getmtime(p) < 24 * 3600]
+        ok = bad = 0
+        for p in recent[:40]:
             try:
-                _tail = open(_p, errors="replace").read()[-4000:]
+                tail = open(p, errors="replace").read()[-4000:]
             except OSError:
                 continue
-            _m = _re.findall(r"final\s*\|\s*status=(\w+)", _tail)
-            if not _m:
+            m = re.findall(r"final\s*\|\s*status=(\w+)", tail)
+            if not m:
                 continue
-            if _m[-1] == "completed":
-                _ok += 1
-            elif _re.search(r"401|authentication|credit balance|invalid x-api-key", _tail, _re.I):
-                _bad += 1
-        if _bad and not _ok:
-            P1.append(f"Delegation dead: last {_bad} subagent run(s) failed on auth — check auth.json credential pool")
-        elif _bad:
-            P1.append(f"Delegation flaky: {_bad} auth failure(s) vs {_ok} completed in 24h")
+            if m[-1] == "completed":
+                ok += 1
+            elif re.search(r"401|authentication|credit balance|invalid x-api-key", tail, re.I):
+                bad += 1
+        if bad and not ok:
+            return [f"Delegation dead: last {bad} subagent run(s) failed on auth — check auth.json credential pool"]
+        if bad:
+            return [f"Delegation flaky: {bad} auth failure(s) vs {ok} completed in 24h"]
+        return []
     except Exception as e:
-        P1.append(f"Delegation probe failed: {e}")
+        return [f"Delegation probe failed: {e}"]
 
-    # ── 7. Memory store pressure (backstop for proactive-storage doctrine) ──
-    # The in-session doctrine stops autonomous ADD at 90% and gates eviction.
-    # This is the BACKSTOP: page only when a store creeps to >=98% of its cap —
-    # i.e. the doctrine failed to keep up and the store is about to reject writes.
-    # Caps live in config.yaml (memory.memory_char_limit / memory.user_char_limit).
+def check_memory_pressure():
+    # Backstop for the proactive-storage doctrine: the in-session doctrine stops autonomous ADD
+    # at 90% and gates eviction; page only when a store creeps to >=92% of its cap, i.e. the
+    # doctrine failed to keep up. Caps live in each profile's config.yaml
+    # (memory.memory_char_limit / memory.user_char_limit).
     try:
-        import yaml as _yaml7
+        import yaml
         # Probe BOTH the default profile AND each sister profile under profiles/.
         # Each profile carries its OWN caps in its OWN config.yaml — never assume
         # default's caps apply to a sister (ha-bot ran 2200/1375 vs default 3000/1750).
         # (label, config.yaml path, memories dir)
-        _mem_targets = [("default", f"{HERMES}/config.yaml", f"{HERMES}/memories")]
-        _prof_root = f"{HERMES}/profiles"
+        targets = [("default", f"{HERMES}/config.yaml", f"{HERMES}/memories")]
+        prof_root = f"{HERMES}/profiles"
         # Skip rollback/update SNAPSHOTS — they are frozen archives, not live
         # profiles; their stores are stale by design and must not page.
-        _snap_re = re.compile(r"^(pre-update|stable|pre-|backup-|snapshot)", re.I)
-        if os.path.isdir(_prof_root):
-            for _p in sorted(os.listdir(_prof_root)):
-                if _snap_re.match(_p):
+        snap_re = re.compile(r"^(pre-update|stable|pre-|backup-|snapshot)", re.I)
+        if os.path.isdir(prof_root):
+            for p in sorted(os.listdir(prof_root)):
+                if snap_re.match(p):
                     continue
-                _pcfg = f"{_prof_root}/{_p}/config.yaml"
-                _pmem = f"{_prof_root}/{_p}/memories"
-                if os.path.isfile(_pcfg) and os.path.isdir(_pmem):
-                    _mem_targets.append((_p, _pcfg, _pmem))
-        for _label, _cfgpath, _memdir in _mem_targets:
+                cfg, mem = f"{prof_root}/{p}/config.yaml", f"{prof_root}/{p}/memories"
+                if os.path.isfile(cfg) and os.path.isdir(mem):
+                    targets.append((p, cfg, mem))
+        found = []
+        for label, cfgpath, memdir in targets:
             try:
-                with open(_cfgpath) as _cf:
-                    _pc = (_yaml7.safe_load(_cf) or {}).get("memory") or {}
+                with open(cfgpath) as cf:
+                    pc = (yaml.safe_load(cf) or {}).get("memory") or {}
             except Exception:
-                _pc = {}
-            _mlimit = int(_pc.get("memory_char_limit", 3000))
-            _ulimit = int(_pc.get("user_char_limit", 2250))
-            for _name, _path, _lim in (("MEMORY.md", f"{_memdir}/MEMORY.md", _mlimit),
-                                       ("USER.md",   f"{_memdir}/USER.md",   _ulimit)):
+                pc = {}
+            mlimit = int(pc.get("memory_char_limit", 3000))
+            ulimit = int(pc.get("user_char_limit", 2250))
+            for name, path, lim in (("MEMORY.md", f"{memdir}/MEMORY.md", mlimit),
+                                    ("USER.md",   f"{memdir}/USER.md",   ulimit)):
                 try:
-                    with open(_path, encoding="utf-8") as _mf:
-                        _n = len(_mf.read())
-                    _pct = round(_n / _lim * 100)
-                    if _pct >= 92:
-                        P1.append(f"[{_label}] {_name} at {_pct}% ({_n}/{_lim}) — compaction overdue, store near reject")
+                    with open(path, encoding="utf-8") as mf:
+                        n = len(mf.read())
+                    pct = round(n / lim * 100)
+                    if pct >= 92:
+                        found.append(f"[{label}] {name} at {pct}% ({n}/{lim}) — compaction overdue, store near reject")
                 except FileNotFoundError:
                     pass
+        return found
     except Exception as e:
-        P1.append(f"Memory pressure probe failed: {e}")
+        return [f"Memory pressure probe failed: {e}"]
 
-    # ── 8. Anthropic bypass fallback detection ──────────────────────────────
+def check_auth_fallback():
     # "Primary provider auth failed" means the bypass token expired/refused and
     # requests are falling back to the fallback provider. Alert if any in the last 65 min.
     try:
-        with open(f"{HERMES}/logs/gateway.log", "rb") as _gf:
-            _count = auth_failures(_gf.read().decode("utf-8", errors="ignore"), datetime.now())
-        if _count > 0:
-            P1.append(f"Anthropic bypass fallback: {_count} auth failure(s) in last 65 min — primary provider auth failing")
+        with open(f"{HERMES}/logs/gateway.log", "rb") as f:
+            count = auth_failures(f.read().decode("utf-8", errors="ignore"), datetime.now())
+        if count > 0:
+            return [f"Anthropic bypass fallback: {count} auth failure(s) in last 65 min — primary provider auth failing"]
+        return []
     except Exception as e:
-        P1.append(f"Auth-failure log probe failed: {e}")
+        return [f"Auth-failure log probe failed: {e}"]
 
-    # ── 8b. RAG prefetch timeouts — 2026-10-15: swarm workers starved the LH02 embedder
-    # ~40 min and every turn silently ran without cold-store recall.
+def check_rag_prefetch():
+    # 2026-10-15: swarm workers starved the LH02 embedder ~40 min and every turn silently
+    # ran without cold-store recall.
     try:
-        with open(f"{HERMES}/logs/agent.log", "rb") as _af:
-            _pf = log_hits(_af.read().decode("utf-8", errors="ignore"), datetime.now(), "prefetch timed out")
-        if _pf >= 3:
-            P1.append(f"RAG prefetch timed out {_pf}x in last 65 min — turns ran without recall (check LH02 Ollama /api/ps, swarm workers)")
+        with open(f"{HERMES}/logs/agent.log", "rb") as f:
+            n = log_hits(f.read().decode("utf-8", errors="ignore"), datetime.now(), "prefetch timed out")
+        if n >= 3:
+            return [f"RAG prefetch timed out {n}x in last 65 min — turns ran without recall (check LH02 Ollama /api/ps, swarm workers)"]
+        return []
     except Exception as e:
-        P1.append(f"Prefetch-timeout log probe failed: {e}")
+        return [f"Prefetch-timeout log probe failed: {e}"]
 
-    # ── 9. local-guards plugin liveness (gateway armed, not just on disk) ──
+def check_local_guards():
     # Proves each native guard (plugins/local-guards/guards/*.py) emitted
     # '[local-guards] <name> armed' in the LIVE GATEWAY PROCESS (journal since gateway start).
     try:
-        _GUARDS_DIR = f"{HERMES}/plugins/local-guards/guards"
+        guards_dir = f"{HERMES}/plugins/local-guards/guards"
         try:
-            _guard_names = sorted(f[:-3] for f in os.listdir(_GUARDS_DIR) if f.endswith(".py") and not f.startswith("_"))
+            names = sorted(f[:-3] for f in os.listdir(guards_dir) if f.endswith(".py") and not f.startswith("_"))
         except FileNotFoundError:
-            P1.append(f"local-guards guards/ missing at {_GUARDS_DIR} — guards not active in gateway")
-            _guard_names = []
-        if _guard_names:
-            _, _gw_pid, _ = sh(
-                "XDG_RUNTIME_DIR=/run/user/0 systemctl --user show "
-                "-p MainPID --value hermes-gateway.service"
+            return [f"local-guards guards/ missing at {guards_dir} — guards not active in gateway"]
+        if not names:
+            return []
+        found = []
+        _, pid, _ = sh(
+            "XDG_RUNTIME_DIR=/run/user/0 systemctl --user show "
+            "-p MainPID --value hermes-gateway.service"
+        )
+        pid = pid.strip()
+        since = None
+        if not pid or pid == "0":
+            found.append("local-guards liveness: gateway MainPID unavailable — cannot probe liveness")
+        else:
+            try:
+                with open("/proc/stat") as pf:
+                    boot_epoch = next(int(ln.split()[1]) for ln in pf if ln.startswith("btime"))
+                with open(f"/proc/{pid}/stat") as sf:
+                    start_epoch = boot_epoch + int(sf.read().split()[21]) / os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+                since = datetime.fromtimestamp(start_epoch).strftime("%Y-%m-%d %H:%M:%S")  # local: journalctl --since parses local
+            except Exception as e:
+                found.append(f"local-guards liveness: start time read failed: {e}")
+        if since:
+            _, journal, _ = sh(
+                f"XDG_RUNTIME_DIR=/run/user/0 journalctl --user "
+                f"-u hermes-gateway.service --since '{since}' --no-pager",
+                timeout=30,
             )
-            _gw_pid = _gw_pid.strip()
-            _gw_start_epoch = None
-            _since_str = None
-            if not _gw_pid or _gw_pid == "0":
-                P1.append("local-guards liveness: gateway MainPID unavailable — cannot probe liveness")
-            else:
-                try:
-                    with open("/proc/stat") as _pf:
-                        _boot_epoch = next(
-                            int(_ln.split()[1]) for _ln in _pf if _ln.startswith("btime")
-                        )
-                    with open(f"/proc/{_gw_pid}/stat") as _sf:
-                        _gw_start_epoch = (
-                            _boot_epoch
-                            + int(_sf.read().split()[21]) / os.sysconf(os.sysconf_names["SC_CLK_TCK"])
-                        )
-                    _since_str = datetime.fromtimestamp(
-                        _gw_start_epoch
-                    ).strftime("%Y-%m-%d %H:%M:%S")  # local: journalctl --since parses local
-                except Exception as _ste:
-                    P1.append(f"local-guards liveness: start time read failed: {_ste}")
-            if _since_str:
-                _, _jout, _ = sh(
-                    f"XDG_RUNTIME_DIR=/run/user/0 journalctl --user "
-                    f"-u hermes-gateway.service --since '{_since_str}' --no-pager",
-                    timeout=30,
-                )
-                for _gname in _guard_names:
-                    _marker = f"[local-guards] {_gname} armed"
-                    if _jout.count(_marker) == 0:
-                        P1.append(
-                            f"GUARD NOT ARMED IN GATEWAY: '{_marker}' absent "
-                            f"in journal since {_since_str}"
-                        )
-    except Exception as _lge:
-        P1.append(f"local-guards liveness probe failed: {_lge}")
+            for name in names:
+                marker = f"[local-guards] {name} armed"
+                if journal.count(marker) == 0:
+                    found.append(f"GUARD NOT ARMED IN GATEWAY: '{marker}' absent in journal since {since}")
+        return found
+    except Exception as e:
+        return [f"local-guards liveness probe failed: {e}"]
 
-    fails = [("P0", m) for m in P0] + [("P1", m) for m in P1]
-    sig = signature(m for _, m in fails)
+
+def main():
+    findings = (check_wall_dash(env("WALL_DASH_URL"))
+                + check_gateway()
+                + check_dispatcher()
+                + check_kb_daemon()
+                + check_disks(env("VPS_A_HOST"))
+                + check_cron()
+                + check_delegation()
+                + check_memory_pressure()
+                + check_auth_fallback()
+                + check_rag_prefetch()
+                + check_local_guards())
+    fails = [("P1", m) for m in findings]
+    sig = signature(findings)
 
     if not fails:
         try: os.remove(STATE)   # clear state on recovery so next failure alerts immediately
@@ -303,8 +304,7 @@ def main():
     with open(STATE, "w") as f:
         json.dump({"sig": sig, "ts": now.isoformat()}, f)
 
-    sev = "P0" if P0 else "P1"
-    print(f"\u26a0 INFRA WATCHDOG [{sev}] {now.strftime('%Y-%m-%d %H:%M')}Z — {len(fails)} issue(s):")
+    print(f"\u26a0 INFRA WATCHDOG [P1] {now.strftime('%Y-%m-%d %H:%M')}Z — {len(fails)} issue(s):")
     for s, m in fails:
         print(f"  [{s}] {m}")
     print("\nRead-only detection. To act: ask me to run `infra-incident-triage` (diagnose \u2192 propose \u2192 your approval).")

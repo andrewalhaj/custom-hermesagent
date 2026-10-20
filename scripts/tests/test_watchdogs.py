@@ -9,6 +9,7 @@ import yaml
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import cron_health  # noqa: E402
 import infra_watchdog  # noqa: E402
 import skill_desc_reconcile as recon  # noqa: E402
 
@@ -46,7 +47,7 @@ def test_cron_health_surfaces_every_non_ok_status_with_its_error():
         {"name": "Off", "enabled": False, "last_status": "error"},
         {"name": "Infra Watchdog (hourly)", "last_status": "error"},
     ]
-    alerts = infra_watchdog.cron_health(jobs)
+    alerts = cron_health.alerts(jobs)
     assert alerts == ["Cron 'Backup': last run error: Script timed out after 600s",
                       "Cron 'Digest': last run delivery_failed: chat not found"]
 

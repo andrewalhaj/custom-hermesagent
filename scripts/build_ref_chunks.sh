@@ -9,7 +9,7 @@ set -euo pipefail
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 SCRIPT_DIR="$HERMES_HOME/scripts"
-PYTHON="/usr/local/lib/hermes-agent/venv/bin/python3"
+PYTHON="${HERMES_VENV:-/usr/local/lib/hermes-agent/venv}/bin/python3"
 LOCK_FILE="$HERMES_HOME/cache/ref_chunks/.build.lock"
 LOG_FILE="$HERMES_HOME/logs/ref_chunks_build.log"
 

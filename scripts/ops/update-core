@@ -10,8 +10,9 @@ export PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 export XDG_RUNTIME_DIR=/run/user/0
 export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
 
-HERMES="/usr/local/lib/hermes-agent/venv/bin/hermes"
-VENV_PY="/usr/local/lib/hermes-agent/venv/bin/python3"
+VENV="${HERMES_VENV:-/usr/local/lib/hermes-agent/venv}"
+HERMES="$VENV/bin/hermes"
+VENV_PY="$VENV/bin/python3"
 REPO="/usr/local/lib/hermes-agent"
 UV="$(command -v uv || echo "$HOME/.local/bin/uv")"
 ENV_FILE="$HERMES_HOME/.env"
