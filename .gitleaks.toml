@@ -1,0 +1,53 @@
+# Gitleaks configuration for custom-hermesagent (public repo: generic patterns only).
+# The strict operator config with real addresses lives outside the repo.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "tailscale-cgnat-ip"
+description = "Tailscale CGNAT address (carrier-grade NAT range)"
+regex = '''\b100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}\b'''
+tags = ["infra", "tailscale"]
+
+[[rules]]
+id = "tailnet-hostname"
+description = "Tailscale MagicDNS hostname (placeholders like <tailnet>.ts.net are allowed)"
+regex = '''\b[a-z0-9-]+\.[a-z0-9-]+\.ts\.net\b'''
+tags = ["infra", "tailscale"]
+
+[[rules]]
+id = "root-deploy-path"
+description = "Absolute home-directory deploy path (use ~/ or $HOME/ instead)"
+regex = '''/root/[A-Za-z0-9._-]+'''
+tags = ["infra", "path"]
+
+[[rules]]
+id = "custom-bearer-token"
+description = "Bearer token in code"
+regex = '''(?i)bearer\s+[a-zA-Z0-9_\-+=/]{20,}'''
+tags = ["token", "bearer", "auth"]
+
+[[rules]]
+id = "custom-private-key-pattern"
+description = "Inline private key"
+regex = '''-----BEGIN\s?(RSA|DSA|EC|OPENSSH|PGP)?\s?PRIVATE\s?KEY-----'''
+tags = ["key", "private"]
+
+[allowlist]
+description = "Known safe values for custom-hermesagent"
+paths = [
+    '''(^|/)\.git/''',
+    # name:<sha256> checksums of bundled skills, not keys
+    '''^skills/\.bundled_manifest$''',
+]
+regexes = [
+    '''placeholder''',
+    '''your-key-here''',
+    '''changeme''',
+    '''example\.com''',
+    '''GITHUB_TOKEN''',
+    '''<[A-Za-z0-9_-]+>\.ts\.net''',
+    # documentation placeholders
+    '''(?i)bearer\s+(sk-)?x{8,}''',
+]

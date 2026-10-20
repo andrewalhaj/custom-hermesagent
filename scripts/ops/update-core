@@ -1,0 +1,128 @@
+#!/bin/bash
+# Hermes core update: snapshot, `hermes update`, re-apply core patches, migrate, env drop-ins,
+# venv deps, restart, verify; progress goes to Telegram because the update severs chat.
+# Launch detached: systemd-run --unit=hermes-update-$(date +%s) --collect /bin/bash ~/.hermes/scripts/ops/update-core
+# Before launch, put any core-file edits to keep as $PREP/*.patch (hermes-core-update-with-bypass §0b).
+set -uo pipefail
+. "$(dirname "$0")/../lib/hermes_env.sh"
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+export PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+export XDG_RUNTIME_DIR=/run/user/0
+export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+
+HERMES="/usr/local/lib/hermes-agent/venv/bin/hermes"
+VENV_PY="/usr/local/lib/hermes-agent/venv/bin/python3"
+REPO="/usr/local/lib/hermes-agent"
+UV="$(command -v uv || echo "$HOME/.local/bin/uv")"
+ENV_FILE="$HERMES_HOME/.env"
+CHAT_ID="$(hermes_require UPDATE_NOTIFY_CHAT_ID)" || exit 1
+TS="$(date +%Y%m%d-%H%M%S)"
+LOGFILE="$HERMES_HOME/logs/update-runner-${TS}.log"
+SNAP="pre-update-$(date +%Y-%m)"
+PREP="$HERMES_HOME/references/update-prep-$(date +%Y-%m-%d)"
+UNIT_DIR="$HOME/.config/systemd/user"
+mkdir -p "$HERMES_HOME/logs" "$PREP"
+
+TOKEN="$(hermes_env TELEGRAM_BOT_TOKEN)"
+log()    { echo "[$(date +%H:%M:%S)] $*" >> "$LOGFILE"; }
+notify() { log "$1"; [ -n "$TOKEN" ] && printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TOKEN" | curl -s --max-time 20 -K - \
+  --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=$1" \
+  -d "disable_web_page_preview=true" >/dev/null 2>&1 || true; }
+
+notify "🔧 Hermes update started (${TS}). Chat goes dark on gateway restart; progress here. Log: ${LOGFILE}"
+
+# ---- 1. Snapshot ----
+notify "1/10 📸 Snapshot profile ${SNAP}…"
+"$HERMES" profile create "$SNAP" --clone-all >>"$LOGFILE" 2>&1 \
+  && notify "1/10 ✅ Snapshot ok." || notify "1/10 ⚠️ Snapshot issue — continuing (update has --backup)."
+
+# ---- 2. Update ----
+notify "2/10 ⬇️ hermes update --yes --backup…"
+if "$HERMES" update --yes --backup >>"$LOGFILE" 2>&1; then
+  notify "2/10 ✅ $("$HERMES" --version 2>/dev/null | head -1)"
+else
+  notify "2/10 ❌ UPDATE FAILED — still on old code. Rollback: hermes profile use ${SNAP}. See ${LOGFILE}"
+  exit 1
+fi
+
+# ---- 2b. Core-file patch re-apply (unprotected edits captured pre-update as $PREP/*.patch) ----
+notify "2b/10 🩹 re-applying core-file patches…"
+cd "$REPO"
+CONFLICTS="$(git status --short | grep -E '^(UU|AA|DD)' | head -10)"
+[ -n "$CONFLICTS" ] && notify "2b/10 ⚠️ stash-pop left conflicts: ${CONFLICTS}"
+PR="2b/10 patches:"
+for p in "$PREP"/*.patch; do
+  [ -f "$p" ] || continue
+  n="$(basename "$p" .patch)"
+  f="$(grep -m1 '^+++ b/' "$p" | cut -c7-)"
+  if [ -n "$f" ] && git diff --quiet HEAD -- "$f" 2>/dev/null; then
+    if git apply --check "$p" >>"$LOGFILE" 2>&1 && git apply "$p" >>"$LOGFILE" 2>&1; then PR="${PR} ${n}=ok"
+    elif git apply --3way "$p" >>"$LOGFILE" 2>&1; then PR="${PR} ${n}=3way"
+    else PR="${PR} ${n}=FAILED"; fi
+  else
+    PR="${PR} ${n}=already-dirty(skipped)"
+  fi
+done
+notify "$PR"
+# untracked modules the patches import must survive the update
+[ -f "$REPO/hermes_transient_errors.py" ] && log "hermes_transient_errors.py present" || notify "2b/10 ⚠️ hermes_transient_errors.py MISSING post-update"
+"$VENV_PY" -m py_compile gateway/run.py hermes_cli/main.py hermes_cli/kanban_db.py tools/kanban_tools.py agent/transports/chat_completions.py >>"$LOGFILE" 2>&1 \
+  && notify "2b/10 ✅ patched core files compile." || notify "2b/10 ❌ patched core file COMPILE FAILURE — check log before restart."
+
+# ---- 3. Config migrate ----
+notify "3/10 🔧 config migrate (default + satellites)…"
+"$HERMES" config migrate >>"$LOGFILE" 2>&1 && notify "3/10 ✅ default migrated." || notify "3/10 ⚠️ default migrate issue — check log."
+FAILED_PROFILES=""
+for p in $(ls -d "$HERMES_HOME"/profiles/*/ 2>/dev/null | xargs -n1 basename); do
+  "$HERMES" --profile "$p" config migrate >>"$LOGFILE" 2>&1 || FAILED_PROFILES="${FAILED_PROFILES} ${p}"
+done
+[ -n "$FAILED_PROFILES" ] && notify "3/10 ⚠️ satellite migrate failed for:${FAILED_PROFILES}" || notify "3/10 ✅ all satellite profiles migrated."
+
+# ---- 4. (retired 2026-10-16: bypass reinstall — install.sh would recreate patches/ + sitecustomize) ----
+
+# ---- 5. EnvironmentFile drop-ins (PITFALL 7; drop-in form survives v0.20.1+ unit regen) ----
+notify "5/10 🧷 verifying EnvironmentFile drop-ins…"
+for u in hermes-gateway.service; do
+  D="${UNIT_DIR}/${u}.d"; mkdir -p "$D"
+  [ -f "$D/envfile.conf" ] || printf '[Service]\nEnvironmentFile=-%s/.env\n' "$HERMES_HOME" > "$D/envfile.conf"
+done
+systemctl --user daemon-reload >>"$LOGFILE" 2>&1 || log "daemon-reload nonzero"
+EF="$(systemctl --user show hermes-gateway.service -p EnvironmentFiles --value 2>/dev/null)"
+echo "$EF" | grep -qF "$HERMES_HOME/.env" && notify "5/10 ✅ EnvironmentFile drop-in active." || notify "5/10 ⚠️ EnvironmentFile NOT showing: '${EF}'"
+
+# ---- 6. venv deps (the update rebuilds the venv from base requirements) ----
+notify "6/10 📦 venv deps…"
+MISSING=""
+for m in supabase sentry_sdk playwright; do "$VENV_PY" -c "import $m" >>"$LOGFILE" 2>&1 || MISSING="$MISSING $m"; done
+if [ -n "$MISSING" ]; then
+  "$UV" pip install --python "$VENV_PY" $MISSING >>"$LOGFILE" 2>&1 \
+    && notify "6/10 ♻️ reinstalled into rebuilt venv:${MISSING}" || notify "6/10 ❌ venv reinstall FAILED for:${MISSING}"
+fi
+
+# ---- 7. Restart gateways ----
+notify "7/10 🔄 restarting gateway…"
+systemctl --user restart hermes-gateway.service >>"$LOGFILE" 2>&1 \
+  && notify "7/10 ✅ default gateway restarted." || notify "7/10 ⚠️ default restart failed via unit bus — Andrew: ssh $(hermes_env LH01_SSH "the host") && systemctl --user restart hermes-gateway.service"
+
+# ---- 8. Env verification on NEW pid ----
+sleep 10
+GW_PID="$(systemctl --user show -p MainPID --value hermes-gateway.service 2>/dev/null)"
+if [ -n "$GW_PID" ] && [ "$GW_PID" != "0" ] && [ -r "/proc/$GW_PID/environ" ]; then
+  KC="$(tr '\0' '\n' < /proc/$GW_PID/environ | grep -cE '^(DEEPSEEK_API_KEY|ANTHROPIC|XAI|TELEGRAM|DISCORD)')"
+  notify "8/10 🔍 gateway pid ${GW_PID}, env keys loaded: ${KC} (0 = PITFALL 7 live!)"
+else
+  notify "8/10 ❌ gateway MainPID unavailable — check: systemctl --user status hermes-gateway"
+fi
+
+# ---- 9. Guard markers in journal ----
+sleep 5
+JM="$(journalctl --user -u hermes-gateway.service --since "-60s" --no-pager 2>/dev/null | grep -oE '\[local-guards\] [0-9]+/[0-9]+ armed' | tail -1)"
+notify "9/10 📋 journal: ${JM:-no local-guards summary line} (want N/N armed)."
+
+# ---- 10. Live auth test ----
+H="$(timeout 120 "$HERMES" chat -q 'Reply with exactly: AUTH TEST OK' --provider anthropic -m claude-sonnet-4-6 -Q 2>>"$LOGFILE")"
+if echo "$H" | grep -q "AUTH TEST OK"; then
+  notify "10/10 ✅ Anthropic auth WORKING. Version: $("$HERMES" --version 2>/dev/null | head -1). Log: ${LOGFILE}"
+else
+  notify "10/10 ❌ auth test FAILED. Got: $(echo "$H" | head -c 200). See ${LOGFILE} + bypass skill PITFALLs 10-12."
+fi

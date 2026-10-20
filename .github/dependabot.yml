@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # no pip manifest is tracked here; the scripts run on the managed Hermes interpreter
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

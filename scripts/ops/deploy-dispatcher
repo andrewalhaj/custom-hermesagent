@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Deploy repo B (~/hermes-dispatcher): the service runs from this checkout, so deploy =
+# clean master + green tests + restart + verify. Refuses rather than restarting untested code.
+set -uo pipefail
+OPS="$(dirname "$(readlink -f "$0")")"   # before cd: $0 may be relative
+cd "$HOME/hermes-dispatcher" || exit 1
+[ "$(git branch --show-current)" = master ] || { echo "deploy-dispatcher: not on master" >&2; exit 1; }
+git diff --quiet HEAD || { echo "deploy-dispatcher: uncommitted changes" >&2; exit 1; }
+.venv/bin/python -m pytest -q || { echo "deploy-dispatcher: tests failed, not restarting" >&2; exit 1; }
+exec "$OPS/restart" dispatcher

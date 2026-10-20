@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Is Hermes healthy? Functional probes from references/system-inventory.md, including every
+# cron job's last_status. Exit 1 on any FAIL.
+exec /usr/local/lib/hermes-agent/venv/bin/python "$HOME/.hermes/scripts/health_audit.py"

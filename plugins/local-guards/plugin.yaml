@@ -1,0 +1,7 @@
+name: local-guards
+version: "1.0.0"
+description: >
+  Arm Hermes guards in every process (gateway and CLI) at startup: each module in
+  guards/ registers its HOOKS via ctx.register_hook. One log line per guard.
+author: hermes
+kind: standalone

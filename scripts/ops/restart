@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Restart a Hermes service, wait 20s, prove it is up (PROGRAM D7). Exit 1 if not.
+# Usage: restart gateway|dispatcher. Run from outside the gateway: it can't restart itself.
+set -uo pipefail
+SUDO=$([ "$EUID" -eq 0 ] || echo sudo)
+
+case "${1:-}" in
+  gateway)
+    since="$(date '+%Y-%m-%d %H:%M:%S')"
+    systemctl --user restart hermes-gateway.service || exit 1
+    sleep 20
+    systemctl --user is-active --quiet hermes-gateway.service || { echo "gateway: NOT active"; exit 1; }
+    banner="$(journalctl --user -u hermes-gateway.service --since "$since" --no-pager \
+      | grep -oE '\[local-guards\] [0-9]+/[0-9]+ armed' | tail -1)"
+    n="${banner#* }"; n="${n% armed}"
+    echo "gateway: active; ${banner:-no [local-guards] banner since restart}"
+    [ -n "$banner" ] && [ "${n%/*}" = "${n#*/}" ]   # every guard armed, e.g. 5/5
+    ;;
+  dispatcher)
+    $SUDO systemctl restart hermes-dispatcher.service || exit 1
+    sleep 20
+    systemctl is-active --quiet hermes-dispatcher.service || { echo "dispatcher: NOT active"; exit 1; }
+    code="$(curl -s -o /dev/null -m 10 -w '%{http_code}' http://127.0.0.1:8787/api/health)"
+    echo "dispatcher: active; /api/health HTTP $code"
+    [ "$code" = 200 ]
+    ;;
+  *) echo "usage: $(basename "$0") gateway|dispatcher" >&2; exit 2 ;;
+esac

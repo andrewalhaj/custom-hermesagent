@@ -1,0 +1,8 @@
+{
+  "centroid_l0_threshold": 0.8,
+  "knn_distance_threshold": 0.3,
+  "calibration_date": "2026-06-26",
+  "validation_n": 188,
+  "selective_risk_at_threshold": 0.0,
+  "coverage_at_threshold": 0.0053
+}

@@ -1,0 +1,20 @@
+name: ponytail-scoped
+version: 0.1.0
+description: Wraps the vendored Ponytail plugin; injects it only after a coding signal, with a code-only scope preamble.
+provides_hooks:
+  - pre_llm_call
+  - pre_gateway_dispatch
+provides_commands:
+  - ponytail
+  - ponytail-review
+  - ponytail-audit
+  - ponytail-debt
+  - ponytail-gain
+  - ponytail-help
+provides_skills:
+  - ponytail
+  - ponytail-review
+  - ponytail-audit
+  - ponytail-debt
+  - ponytail-gain
+  - ponytail-help

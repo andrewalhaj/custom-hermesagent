@@ -1,0 +1,55 @@
+*
+!.gitignore
+!patches/
+!patches/**
+!plugins/
+!plugins/**
+!scripts/
+!scripts/**
+!hooks/
+!hooks/**
+!skills/
+!skills/**
+**/.venv/
+**/__pycache__/
+**/node_modules/
+*.bak*
+*.golden.py*
+*.REMOVED*
+skills/.archive/
+skills/.curator_backups/
+**/*.env
+**/.env*
+!README.md
+
+# per-skill lock files (runtime)
+skills/.locks/
+
+# classifier data: codenamed taxonomy + derived pickles stay local
+scripts/knowledge/taxonomy.json
+scripts/knowledge/*.pkl
+
+# generated skill telemetry (local only)
+skills/.curator_ledger.jsonl
+skills/.curator_state
+skills/.usage.json
+# host-specific one-off tooling, not published
+scripts/whoami-live.sh
+scripts/tg_backfill/
+# symlinks into the untracked vendor/ checkout — dangling for anyone else
+skills/frontend-design/react-best-practices
+skills/frontend-design/web-design-guidelines
+!.github/
+!.github/**
+!.gitleaks.toml
+
+# skill-hub cache, lock and audit log (generated, local only)
+skills/.hub/
+
+# one-off script (personal paths, OAuth creds); local only
+scripts/refactor_runner.py
+scripts/tests/test_refactor_runner.py
+
+# generated skill sync state / lock (local only)
+skills/.bundled_manifest
+skills/.usage.json.lock
