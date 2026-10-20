@@ -16,7 +16,8 @@ from knowledge import config
 def test_env_prefers_process_env_then_dotenv_then_default(tmp_path, monkeypatch):
     f = tmp_path / ".env"
     f.write_text('# comment\nK_BOTH="from-file"\nK_FILE=\'file-only\'\n')
-    monkeypatch.setattr(config, "ENV_FILE", str(f))
+    monkeypatch.setattr(config.hermes_env, "HERMES_HOME", tmp_path)
+    config.hermes_env._cache.clear()
     monkeypatch.setenv("K_BOTH", "from-env")
     monkeypatch.delenv("K_FILE", raising=False)
     monkeypatch.delenv("K_NONE", raising=False)

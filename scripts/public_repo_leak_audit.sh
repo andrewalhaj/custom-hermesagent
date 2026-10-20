@@ -35,7 +35,7 @@ for repo in $REPOS; do
     FINDINGS="$FINDINGS\n⚠️ $repo: clone failed (deleted? renamed? network?)"
     continue
   fi
-  cd "$WORK/$repo"
+  cd "$WORK/$repo" || continue
 
   # 1. gitleaks with the strict local config
   if ! gitleaks git --config "$CONFIG" --no-banner --exit-code 1 >/dev/null 2>&1; then

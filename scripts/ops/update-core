@@ -73,7 +73,9 @@ notify "$PR"
 notify "3/10 🔧 config migrate (default + satellites)…"
 "$HERMES" config migrate >>"$LOGFILE" 2>&1 && notify "3/10 ✅ default migrated." || notify "3/10 ⚠️ default migrate issue — check log."
 FAILED_PROFILES=""
-for p in $(ls -d "$HERMES_HOME"/profiles/*/ 2>/dev/null | xargs -n1 basename); do
+for d in "$HERMES_HOME"/profiles/*/; do
+  [ -d "$d" ] || continue
+  p="$(basename "$d")"
   "$HERMES" --profile "$p" config migrate >>"$LOGFILE" 2>&1 || FAILED_PROFILES="${FAILED_PROFILES} ${p}"
 done
 [ -n "$FAILED_PROFILES" ] && notify "3/10 ⚠️ satellite migrate failed for:${FAILED_PROFILES}" || notify "3/10 ✅ all satellite profiles migrated."

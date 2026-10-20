@@ -13,15 +13,12 @@ Exit 1 if any DEAD core entries — the boost should fix them before benchmarkin
 """
 import json, sys, urllib.request
 
-from _lib import load_env
-from hermes_env import HERMES_HOME
-
-env = load_env()
+from hermes_env import HERMES_HOME, require
 
 def sb(path):
-    r = urllib.request.Request(env["SUPABASE_URL"] + path, headers={
-        "apikey": env["SUPABASE_SERVICE_KEY"],
-        "Authorization": "Bearer " + env["SUPABASE_SERVICE_KEY"]})
+    r = urllib.request.Request(require("SUPABASE_URL") + path, headers={
+        "apikey": require("SUPABASE_SERVICE_KEY"),
+        "Authorization": "Bearer " + require("SUPABASE_SERVICE_KEY")})
     return json.load(urllib.request.urlopen(r, timeout=30))
 
 store = sb("/rest/v1/knowledge?select=id,text")

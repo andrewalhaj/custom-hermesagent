@@ -94,3 +94,39 @@ def test_bash_helpers(home):
     r = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
     assert r.stdout.splitlines() == ['double quoted', 'dflt', 'second', 'rc=1']
     assert 'MISSING' in r.stderr
+
+
+PARITY = """  SPACED = padded value  
+export   EXP="quoted export"
+EMPTY=
+EQ=a=b=c
+MISMATCH="open
+LONE="
+INNER="has 'inner' quotes"
+CRLF=crlf-value\r
+#COMMENTED=no
+"""
+
+
+def test_python_and_bash_parsers_agree(tmp_path, monkeypatch):
+    """The shell entry point mirrors hermes_env.py: same value for every key shape."""
+    (tmp_path / '.env').write_text(PARITY)
+    monkeypatch.setattr(hermes_env, 'HERMES_HOME', tmp_path)
+    hermes_env._cache.clear()
+    keys = ['SPACED', 'EXP', 'EMPTY', 'EQ', 'MISMATCH', 'LONE', 'INNER', 'CRLF', 'COMMENTED']
+    for k in keys:
+        monkeypatch.delenv(k, raising=False)
+    lib = os.path.join(SCRIPTS, 'lib', 'hermes_env.sh')
+    env = {**os.environ, 'HERMES_HOME': str(tmp_path)}
+    for k in keys:
+        env.pop(k, None)
+        r = subprocess.run(['bash', '-c', f'. "{lib}"; hermes_env {k} UNSET'], env=env,
+                           capture_output=True, text=True)
+        assert r.stdout.rstrip('\n') == hermes_env.env(k, 'UNSET'), k
+    assert hermes_env.env('SPACED') == 'padded value'
+    assert hermes_env.env('EXP') == 'quoted export'
+    assert hermes_env.env('EQ') == 'a=b=c'
+    assert hermes_env.env('INNER') == "has 'inner' quotes"
+    assert hermes_env.env('MISMATCH') == '"open'
+    assert hermes_env.env('EMPTY', 'dflt') == 'dflt'
+    assert hermes_env.env('COMMENTED') is None

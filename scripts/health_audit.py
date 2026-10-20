@@ -42,7 +42,7 @@ import time
 # ── Constants ───────────────────────────────────────────────────────────────
 
 INVENTORY_PATH = os.path.expanduser("~/.hermes/references/system-inventory.md")
-SCRIPTS_DIR = os.path.expanduser("~/.hermes/scripts")
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 KNOWLEDGE_PKG = os.path.join(SCRIPTS_DIR, "knowledge")
 CONFIG_PATH = os.path.expanduser("~/.hermes/config.yaml")
 MEMORY_MD = os.path.expanduser("~/.hermes/memories/MEMORY.md")

@@ -24,7 +24,7 @@ import threading
 import time
 
 SOCKET_PATH = os.path.expanduser('~/.hermes/run/kb.sock')
-SCRIPTS_DIR = os.path.expanduser('~/.hermes/scripts')
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 RUN_DIR = os.path.dirname(SOCKET_PATH)
 MAX_LINE = 64 * 1024     # request line cap, bytes
 RECV_TIMEOUT = 5.0       # total seconds a client gets to send its request line

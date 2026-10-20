@@ -16,15 +16,11 @@ ARCHIVE="$DEST/hermes-backup-$TIMESTAMP.tar.gz"
 KB_DIR=$(mktemp -d)   # 700, under $TMPDIR
 KB_EXPORT="$KB_DIR/knowledge_export_${TIMESTAMP}.json"
 KB_FAIL=0
+SB_URL="$(hermes_env SUPABASE_URL)" SB_KEY="$(hermes_env SUPABASE_SERVICE_KEY "$(hermes_env SUPABASE_KEY)")" \
 KB_EXPORT="$KB_EXPORT" python3 - <<'PYEOF' || KB_FAIL=1
 import json, os, urllib.request
-env = {}
-for ln in open(os.path.expanduser('~/.hermes/.env')):
-    ln = ln.strip()
-    if '=' in ln and not ln.startswith('#'):
-        k, v = ln.split('=', 1); env[k] = v.strip('"').strip("'")
-url = env['SUPABASE_URL']
-key = env.get('SUPABASE_SERVICE_KEY') or env['SUPABASE_KEY']
+url, key = os.environ['SB_URL'], os.environ['SB_KEY']
+if not url or not key: raise SystemExit('SUPABASE_URL / key not set')
 sel = 'id,text,tags,priority,source,stored_at,context_prefix,body_hash,tsv,metadata,sector_path'
 rows, offset, page = [], 0, 1000
 while True:

@@ -14,6 +14,7 @@
 # Recovery: on check 1 failure, auto-restarts ollama via SSH kill → launchd
 # KeepAlive respawn (proven 2026-06-17). Reports outcome either way.
 
+set -u -o pipefail
 . "$(dirname "$0")/lib/hermes_env.sh"
 HOST="$(hermes_require STUDIO_OLLAMA_HOST)" || exit 1
 STUDIO_SSH="$(hermes_require STUDIO_SSH)" || exit 1
@@ -24,11 +25,11 @@ CONNECT_TIMEOUT=10
 GEN_MAX_TIME=60                 # generation probe hard ceiling (s)
 MIN_TOK_PER_SEC=5               # below this = thrashing/degraded
 SSH_KEY="${HOME}/.ssh/id_ed25519"
-SSH_OPTS="-o ConnectTimeout=10 -o BatchMode=yes -o IdentitiesOnly=yes -i ${SSH_KEY}"
+SSH_OPTS=(-o ConnectTimeout=10 -o BatchMode=yes -o IdentitiesOnly=yes -i "$SSH_KEY")
 
 _restart_ollama() {
     # Kill the ollama serve process — launchd KeepAlive=true respawns it
-    ssh $SSH_OPTS "$STUDIO_SSH" \
+    ssh "${SSH_OPTS[@]}" "$STUDIO_SSH" \
         'kill $(pgrep -f "ollama serve" | head -1) 2>/dev/null; true' 2>/dev/null
     sleep 12
     # Recheck

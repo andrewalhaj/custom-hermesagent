@@ -2,7 +2,7 @@
 """Govee Device Control Script — called by Hermes terminal tool or cron."""
 import sys, json, uuid, urllib.request, urllib.error
 
-from _lib import load_env
+from hermes_env import env
 
 BASE_URL = 'https://openapi.api.govee.com/router/api/v1'
 DEVICES_URL = f'{BASE_URL}/user/devices'
@@ -10,7 +10,7 @@ CONTROL_URL = f'{BASE_URL}/device/control'
 STATES_URL = f'{BASE_URL}/device/state'
 
 def get_api_key():
-    return load_env().get('GOVEE_API_KEY')
+    return env('GOVEE_API_KEY')
 
 def api_request(method, url, body=None):
     key = get_api_key()

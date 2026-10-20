@@ -193,7 +193,6 @@ The core library for embedding, storing, and searching facts in Supabase pgvecto
 | `benchmark_extended.py` | Extended retrieval benchmarks: Recall@10 and multi-hop recall |
 | `kbench.py` | Quick retrieval benchmark (P@K, MRR); `--alert` flag for cron-friendly regression detection |
 | `junk_filter.py` | Decides whether a candidate string is a durable, self-contained fact; used by `plugins/supabase` and the heartbeat cron job |
-| `_lib.py` | Shared stdlib helpers for top-level scripts |
 
 ---
 
