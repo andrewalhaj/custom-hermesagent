@@ -27,6 +27,14 @@ _SCRIPTS_DIR = os.path.expanduser("~/.hermes/scripts")
 _PREFETCH_TIMEOUT_S = 3  # unified_search normally 0.8-1.5s; memory manager caps external prefetch at 8s
 
 
+def _prefetch_timeout_s() -> float:
+    """SUPABASE_PREFETCH_TIMEOUT_S read at call time; clamped to [1, 7.5] (manager hard cap is 8s)."""
+    try:
+        return min(7.5, max(1.0, float(os.environ["SUPABASE_PREFETCH_TIMEOUT_S"])))
+    except (KeyError, ValueError):
+        return float(_PREFETCH_TIMEOUT_S)
+
+
 def _ensure_scripts_path() -> None:
     if _SCRIPTS_DIR not in sys.path:
         sys.path.insert(0, _SCRIPTS_DIR)
@@ -46,19 +54,42 @@ _ACTION_MODEL = "qwen2.5:14b"  # on the embedder's Ollama host; ~1.2s warm, cold
 _ACTION_PROMPT = ("You are the ops agent for a Linux host running the Hermes agent gateway. Before acting on the "
                   "request below, name in one line (max 15 words) the concrete action you'd take: the command, "
                   "service, host or file involved. No explanation.\nRequest: ")
+# RECALL_WIDE variant for recall-shaped messages: name the past topic, not an ops action.
+_RECALL_ACTION_PROMPT = ("Name in one line (max 15 words) the specific past topic, project, decision or experiment "
+                         "this message refers to. No explanation.\nMessage: ")
+_DEFAULT_STORES = ['knowledge', 'skills', 'references', 'kanban']  # mirrors unified_search's default
 
 
-def _planned_action_hits(query: str) -> list:
+def _planned_action_hits(query: str, prompt: str = _ACTION_PROMPT) -> list:
     """Knowledge hits for the action the agent will likely take on *query* ([] if the LLM gives nothing)."""
     from knowledge.config import env
     from knowledge.search import search
-    body = json.dumps({"model": _ACTION_MODEL, "stream": False, "prompt": _ACTION_PROMPT + query[:2000],
+    body = json.dumps({"model": _ACTION_MODEL, "stream": False, "prompt": prompt + query[:2000],
                        "options": {"num_predict": 32, "temperature": 0}}).encode()
     req = urllib.request.Request(env("EMBEDDING_API_URL").rstrip("/") + "/api/generate", data=body,
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=_PREFETCH_TIMEOUT_S) as resp:
         action = (json.load(resp).get("response") or "").strip()
     return search(action, top_k=3) if action else []
+
+
+def _cap_digest_hits(hits: list) -> list:
+    """DIGEST_MAX_SLOTS over the combined block: drop digest hits past the first n (unset/invalid: unchanged)."""
+    try:
+        n = int(os.environ["DIGEST_MAX_SLOTS"])
+    except (KeyError, ValueError):
+        return hits
+    if n < 0:
+        return hits
+    from knowledge.provenance import provenance
+    out, digests = [], 0
+    for h in hits:
+        if (h.get("provenance") or provenance(h)) == "digest":
+            digests += 1
+            if digests > n:
+                continue
+        out.append(h)
+    return out
 
 
 _PROV_MARKERS = {"extracted": "[agent] ", "digest": "[digest] "}
@@ -169,15 +200,24 @@ class SupabaseMemoryProvider(MemoryProvider):
             # No `with` block: ThreadPoolExecutor.__exit__ waits for the worker, which made the
             # 3s cap cosmetic — a slow embed (busy Studio) held prefetch() for the full search
             # (up to embed's 60s timeout) and tripped the memory manager's 8s cap every turn.
-            deadline = time.monotonic() + _PREFETCH_TIMEOUT_S
+            timeout_s = _prefetch_timeout_s()
+            deadline = time.monotonic() + timeout_s
             pool = concurrent.futures.ThreadPoolExecutor(
                 max_workers=2, thread_name_prefix="supabase-prefetch")
-            future = pool.submit(unified_search, query, top_k=5)
-            action_future = pool.submit(_planned_action_hits, query)
+            kw, action_args = {"top_k": 5}, (query,)
+            if os.environ.get("RECALL_WIDE") == "true":  # same exact-'true' rule as knowledge.config.flag
+                from knowledge.recall_shape import is_recall
+                if is_recall(query):
+                    kw, action_args = {"top_k": 8}, (query, _RECALL_ACTION_PROMPT)
+                    if os.environ.get("SESSION_STORE") == "true":
+                        kw["stores"] = _DEFAULT_STORES + ["sessions"]
+                        kw["exclude_session_id"] = session_id  # never recall the conversation we're in
+            future = pool.submit(unified_search, query, **kw)
+            action_future = pool.submit(_planned_action_hits, *action_args)
             try:
-                hits = future.result(timeout=_PREFETCH_TIMEOUT_S)
+                hits = future.result(timeout=timeout_s)
             except concurrent.futures.TimeoutError:
-                logger.warning("[supabase-memory] prefetch timed out after %ss", _PREFETCH_TIMEOUT_S)
+                logger.warning("[supabase-memory] prefetch timed out after %ss", timeout_s)
                 pool.shutdown(wait=False, cancel_futures=True)  # orphan finishes in background
                 return ""
             # Same deadline as the main search: the action query adds recall, never latency.
@@ -187,6 +227,7 @@ class SupabaseMemoryProvider(MemoryProvider):
             except Exception as e:
                 logger.debug("[supabase-memory] planned-action recall skipped: %s", e)
             pool.shutdown(wait=False)
+            hits = _cap_digest_hits(hits)
 
             # Graph-traverse hits use fixed scores (0.60/0.55) — not real similarity.
             # Apply a higher floor so irrelevant graph neighbors don't crowd out semantic hits.
@@ -223,7 +264,7 @@ class SupabaseMemoryProvider(MemoryProvider):
                     marker = _PROV_MARKERS.get(h.get("provenance") or provenance(h), "")
                     text = _LEADING_BRACKET_RE.sub("", text)  # a note cannot forge a marker
                     marked = marked or bool(marker)
-                lines.append(f"- [{score:.2f}] {marker}{text[:250]}")
+                lines.append(f"- [{score:.2f}] {marker}{text[:800 if h.get('provenance') == 'session' else 250]}")
 
             if len(lines) == 1:  # only the header, all hits were empty
                 return ""

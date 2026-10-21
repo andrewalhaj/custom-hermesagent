@@ -296,13 +296,34 @@ def distill_session(session, messages):
     return digest
 
 
+def _supersede_previous(digest, tags_list, new_id):
+    """Best-effort: delete this session's earlier digests (tagged, or untagged 'Live:' rows by exact title)."""
+    sid = next((t[8:] for t in tags_list if t.startswith("session:")), None)
+    if not sid or not new_id:
+        return
+    try:
+        from urllib.parse import quote
+        from knowledge import _supa_select, get_supabase
+        from knowledge_maintenance import delete_fact
+        title = digest.split("\n", 1)[0].rsplit(" | ", 1)[0][len("Session: "):]
+        # shortcut: old Live rows carry no tag, so same-titled sessions share them; moot once they age out
+        live = f"Session: Live: {title.removeprefix('Live: ')} | unknown-date"
+        rows = _supa_select("select=id&or=" + quote(f'(tags.cs.["session:{sid}"],text.like.{live}*)'))
+        for r in rows:
+            if r["id"] != new_id:
+                delete_fact(*get_supabase(), r["id"], reason=f"superseded-by:{new_id}")
+    except Exception as e:
+        print(f"[session_distill] supersede failed: {e}", file=sys.stderr)
+
+
 def store_digest(digest, tags=TAGS):
     """Store a digest in Supabase via the knowledge package. Returns True on success."""
     retrieval_flags_off()  # keep within the cron time budget
     try:
         from knowledge import store as _kb_store  # lazy: the session queries don't need it
         tags_list = [t.strip() for t in tags.split(",") if t.strip()]
-        _kb_store(digest, tags=tags_list, priority=PRIORITY, source="session-distill", provenance="digest")
+        new_id = _kb_store(digest, tags=tags_list, priority=PRIORITY, source="session-distill", provenance="digest")
+        _supersede_previous(digest, tags_list, new_id)
         return True
     except ValueError as e:
         # The cold-store guard's rejection is final; retrying would block the watermark forever.
@@ -338,7 +359,7 @@ def main():
         sid = session["id"]
         digest = distill_session(session, get_session_messages(sid))
         # None = not substantive enough; still marked processed
-        if digest is not None and not store_digest(digest):
+        if digest is not None and not store_digest(digest, tags=f"{TAGS},session:{sid}"):
             # Stop here so the watermark stays below this session and it retries next run
             print(
                 f"[session_distill] Failed to store digest for session {sid}",
@@ -363,7 +384,7 @@ def main():
         if digest is None:
             continue
 
-        if store_digest(digest, tags="session-digest,active-session"):
+        if store_digest(digest, tags=f"session-digest,active-session,session:{sid}"):
             distilled += 1
             active_last_distilled[sid] = time.time()
         else:

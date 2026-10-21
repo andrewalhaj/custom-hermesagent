@@ -10,6 +10,24 @@ REF_CHUNKS env flag (read at call time, never at import time):
                   ~/.hermes/logs/ref_chunks_shadow.jsonl for shadowing.
   'on'          — chunk search results returned (capped at REF_CHUNKS_MAX_SLOTS,
                   default 2); A0 results used as fallback when chunks return [].
+
+REF_RESERVED_SLOTS env flag (read at call time, never at import time):
+  unset / '0'   — pure score-ordered top_k merge (default)
+  'N' (int>0)   — clamped to [0, top_k]; if fewer than min(N, available) reference
+                  hits (store == 'reference') made the top_k window, the best missing
+                  ones displace the lowest-scored non-reference hits. Score order kept.
+
+SESSION_STORE env flag (read at call time, never at import time):
+  unset / anything else — 'sessions' in `stores` is ignored (default)
+  '1' / 'on' / 'true'   — stores=[..., 'sessions'] adds up to 2 user-message hits from the last 14
+                          days of state.db (see session_store.py). Never part of the default stores.
+
+DIGEST_MAX_SLOTS env flag (read at call time, never at import time):
+  unset / empty / invalid / negative — no cap (default)
+  'N' (int>=0)  — at most N hits with provenance == 'digest' in the top_k window; excess
+                  digests are replaced by the best-scored non-digest hits from below the
+                  window (score order kept). Too few non-digests: digests stay, never fewer
+                  hits. Applied before REF_RESERVED_SLOTS, which then works on the capped window.
 """
 import os, sqlite3, json, re, time, threading
 from pathlib import Path
@@ -233,7 +251,7 @@ def _search_kanban(query: str, top_k: int = 5) -> List[Dict]:
     results.sort(key=lambda x: x['score'], reverse=True)
     return results[:top_k]
 
-def unified_search(query: str, top_k: int = 10, stores: list = None) -> List[Dict]:
+def unified_search(query: str, top_k: int = 10, stores: list = None, exclude_session_id: str = '') -> List[Dict]:
     """
     Fan-out search across all Hermes knowledge stores.
     Returns merged results ranked by score + sector Fibonacci boost.
@@ -244,18 +262,19 @@ def unified_search(query: str, top_k: int = 10, stores: list = None) -> List[Dic
     Args:
         query: Natural language query
         top_k: Max results to return
-        stores: List of stores to search (default: all)
+        stores: List of stores to search (default: knowledge/skills/references/kanban; unknown names are ignored)
+        exclude_session_id: current session, skipped by the opt-in 'sessions' store
 
     Returns:
         List of dicts with keys: store, id, title, content, score, sector_path, url
     """
     try:
-        result = _unified_search_impl(query, top_k=top_k, stores=stores)
+        result = _unified_search_impl(query, top_k=top_k, stores=stores, exclude_session_id=exclude_session_id)
         return result or []
     except Exception:
         return []
 
-def _unified_search_impl(query: str, top_k: int = 10, stores: list = None) -> List[Dict]:
+def _unified_search_impl(query: str, top_k: int = 10, stores: list = None, exclude_session_id: str = '') -> List[Dict]:
     """Internal implementation for unified_search (see wrapper above)."""
     if stores is None:
         stores = ['knowledge', 'skills', 'references', 'kanban']
@@ -282,6 +301,9 @@ def _unified_search_impl(query: str, top_k: int = 10, stores: list = None) -> Li
         all_results.extend(_search_references(query, query_sector, top_k=top_k) or [])
     if 'kanban' in stores:
         all_results.extend(_search_kanban(query, top_k=top_k) or [])
+    if 'sessions' in stores and os.environ.get('SESSION_STORE', '').lower().strip() in ('1', 'on', 'true'):
+        from knowledge.session_store import search_sessions
+        all_results.extend(search_sessions(query, exclude_session_id=exclude_session_id) or [])
     
     # No sector boost here: search() boosts knowledge hits, _search_skills boosts skills — once each.
     # Sort and deduplicate
@@ -296,4 +318,45 @@ def _unified_search_impl(query: str, top_k: int = 10, stores: list = None) -> Li
             seen.add(key)
             deduped.append(r)
 
+    try:
+        digest_max = int(os.environ['DIGEST_MAX_SLOTS'])
+    except (KeyError, ValueError):
+        digest_max = -1
+    if digest_max >= 0:
+        deduped = _cap_digests(deduped, top_k, digest_max)  # first: ref reservation then sees the capped window
+
+    try:
+        reserved = max(0, min(int(os.environ.get('REF_RESERVED_SLOTS', '0')), top_k))
+    except ValueError:
+        reserved = 0
+    if reserved:
+        return _reserve_ref_slots(deduped, top_k, reserved)
     return deduped[:top_k]
+
+
+def _cap_digests(ranked: List[Dict], top_k: int, n: int) -> List[Dict]:
+    """Keep at most n digest hits in the top_k window of `ranked`; returns the full list, capped window first."""
+    window = ranked[:top_k]
+    excess = [r for r in window if r.get('provenance') == 'digest'][n:]
+    promote = [r for r in ranked[top_k:] if r.get('provenance') != 'digest'][:len(excess)]
+    if not promote:  # nothing to swap in: keep the digests rather than return fewer hits
+        return ranked
+    drop = {id(r) for r in excess[len(excess) - len(promote):]}  # lowest-scored excess digests
+    kept = sorted([r for r in window if id(r) not in drop] + promote,
+                  key=lambda x: x.get('score') or 0, reverse=True)
+    used = {id(r) for r in kept}
+    return kept + [r for r in ranked if id(r) not in used]
+
+
+def _reserve_ref_slots(ranked: List[Dict], top_k: int, n: int) -> List[Dict]:
+    """Ensure up to n reference hits (store == 'reference') are in the top_k window of `ranked`."""
+    window = ranked[:top_k]
+    missing = [r for r in ranked[top_k:] if r.get('store') == 'reference']
+    need = min(n, sum(r.get('store') == 'reference' for r in ranked)) - sum(
+        r.get('store') == 'reference' for r in window)
+    if need <= 0 or not missing:
+        return window
+    promote = missing[:need]  # ranked is score-sorted, so these are the best missing refs
+    drop = {id(r) for r in [r for r in reversed(window) if r.get('store') != 'reference'][:len(promote)]}
+    kept = [r for r in window if id(r) not in drop] + promote
+    return sorted(kept, key=lambda x: x.get('score') or 0, reverse=True)

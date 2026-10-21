@@ -245,7 +245,9 @@ class TestPlannedActionPrefetch(unittest.TestCase):
     def _prefetch(self, action_hits):
         fake_us = MagicMock()
         fake_us.unified_search = lambda q, top_k=5: [{"text": "user-query fact", "score": 0.9}]
-        with patch.object(_supa, "_ensure_scripts_path"), \
+        # The test shell inherits the live gateway's env; these flags must not leak into the fixture.
+        with patch.dict(os.environ, {"RECALL_WIDE": "", "SESSION_STORE": "", "SUPABASE_PREFETCH_TIMEOUT_S": ""}), \
+             patch.object(_supa, "_ensure_scripts_path"), \
              patch.object(_supa, "_planned_action_hits", action_hits), \
              patch.dict(sys.modules, {"knowledge": MagicMock(), "knowledge.unified_search": fake_us}):
             return self.p.prefetch("I edited config.yaml, make it take effect")

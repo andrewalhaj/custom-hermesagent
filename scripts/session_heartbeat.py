@@ -17,6 +17,7 @@ STATE_DB = os.path.join(HERMES_HOME, "state.db")
 SCRIPTS_DIR = os.path.join(HERMES_HOME, "scripts")
 WATERMARK_FILE = os.path.join(HERMES_HOME, "references", "session-heartbeat-watermark.json")
 AUDIT_LOG = os.path.join(HERMES_HOME, "references", "session-heartbeat-audit.md")
+SHADOW_LOG = os.path.join(HERMES_HOME, "logs", "store_gate_shadow.jsonl")
 
 sys.path.insert(0, SCRIPTS_DIR)
 from session_state import connect_ro, retrieval_flags_off, save_json
@@ -59,6 +60,37 @@ def audit(msg: str) -> None:
             f.write(line + "\n")
     except Exception:
         pass
+
+
+# ── Store gate (shadow: scores and logs, never changes what is stored) ──
+
+def gate_scores(facts: list[tuple[str, str]]) -> list[float] | None:
+    """p_drop per fact when STORE_GATE=log; None when off or on any gate failure."""
+    if os.environ.get("STORE_GATE") != "log" or not facts:
+        return None
+    try:
+        from knowledge import store_gate
+        return store_gate.score([f for f, _ in facts])
+    except Exception as exc:
+        audit(f"store gate failed, continuing ungated: {exc}")
+        return None
+
+
+def gate_log(session_id: str, message_id: int, tag: str, fact: str, p_drop: float,
+             stored: bool, guard_rejected: bool) -> None:
+    try:
+        from knowledge.store_gate import THRESHOLD
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "session_id": session_id, "message_id": message_id, "tag": tag, "fact": fact,
+            "p_drop": p_drop, "verdict": "drop" if p_drop >= THRESHOLD else "keep",
+            "stored": stored, "guard_rejected": guard_rejected,
+        }
+        os.makedirs(os.path.dirname(SHADOW_LOG), exist_ok=True)
+        with open(SHADOW_LOG, "a") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception as exc:
+        audit(f"store gate log failed: {exc}")
 
 
 # ── Core ───────────────────────────────────────────────────────────────
@@ -121,7 +153,9 @@ def process_session(
         # from this message next run. A lone oversized message still goes through.
         if stored + skipped and stored + skipped + len(facts) > MAX_FACTS_PER_SESSION:
             break
-        for fact, tag in facts:
+        # Scored up front (one forward pass); only facts that reach store() are logged.
+        scores = gate_scores(facts)
+        for i, (fact, tag) in enumerate(facts):
             if is_duplicate(fact):
                 skipped += 1
                 continue
@@ -134,11 +168,15 @@ def process_session(
                     provenance="extracted",
                 )
                 stored += 1
+                if scores:
+                    gate_log(session_id, m["id"], tag, fact, scores[i], True, False)
             except Exception as exc:
                 # Matched on the message, not ValueError: JSONDecodeError from a
                 # sick backend is a ValueError too and must be retried.
                 if "[cold-store-guard]" in str(exc):
                     skipped += 1  # guard rejection is permanent, don't retry
+                    if scores:
+                        gate_log(session_id, m["id"], tag, fact, scores[i], False, True)
                     continue
                 # Store is down: keep last_id before this message so it is retried.
                 # Facts stored earlier in it are caught by the dedup on retry.

@@ -22,6 +22,7 @@ load_when:
   - "cron delivers to wrong channel / current chat instead of dedicated channel"
   - "cron fails 'Script not found' pointing at WRONG profile's scripts dir"
   - "intermittent cron failures that self-recover next tick (shared ticks w/ profile jobs)"
+  - "web_search returns empty / 'is firecrawl working' / scraping seems off → references/web-stack-troubleshooting.md"
   - "Honcho bridge is broken or writing Not Found to Obsidian"
   - "honcho-bridge.sh not working or showing detail not found"
 ---
@@ -37,12 +38,14 @@ System administration patterns for keeping a Hermes installation healthy: change
 
 ## Standing procedures (moved here from MEMORY.md, 2026-10-16)
 
-- **Gateway restart = from outside only:** `systemctl --user restart hermes-gateway.service`. From inside a session, a stop or mask of any gateway unit must go through a `systemd-run` transient unit (`references/gateway-restart-from-inside.md`). A restart kills in-flight `delegate_task` children, so wait for them first. Mini root SSH is key-only → `references/remote-gateway-restart-ssh.md`.
+- **Gateway restart = the human runs it, full stop.** Core's lifecycle guard (`tools/terminal_tool_guards.py` → `cron/lifecycle_guard.py`, unconditional, no force flag) refuses any command *text* or referenced *script* that restarts/stops/masks a gateway unit — a `systemd-run --on-active` wrapper, a background job or a helper script are all scanned and blocked the same way. Do not rephrase, encode or indirect the command: a trigger that passes only because it doesn't say "hermes-gateway" is an evasion, and the guard's own message says so. Hand over two blocks (`ssh root@<LH01 tailnet IP>` then `systemctl --user restart hermes-gateway.service`), one command each, and end the turn (`references/remote-gateway-restart-ssh.md`). A restart kills in-flight `delegate_task` children but NOT `systemd-run` transient units — long coding jobs belong in units (claude-code skill) when a restart is on the table.
 - **Hermes v0.20.1+ regenerates its systemd units** → change them with drop-ins only (`references/systemd-dropin-content-swap.md`). A sed on the unit file is lost.
 - **Feature-flag flips: check `.env` before trusting a drop-in.** `envfile.conf` loads `EnvironmentFile=-~/.hermes/.env`, and systemd applies EnvironmentFile *after* every `Environment=` line, so a key present in both takes the `.env` value no matter which drop-in sets it. Before writing `FLAG=x` to a drop-in, `grep -n '^FLAG=' ~/.hermes/.env`; if it is there, edit `.env` (gated, script from scratch) or remove the key from it. Prove the flip after restart from the live process, not the files: `tr '\0' '\n' < /proc/$(systemctl --user show -p MainPID --value hermes-gateway.service)/environ | grep '^FLAG='`.
 - **Restart queue, not restart-per-merge.** Batch merged branches, flag flips and drop-in edits behind one restart; before asking for it, confirm no `delegate_task` children or `claude -p` units are running (the restart kills them) and state in one line what the restart loads and the rollback SHA. After it comes back, verify each item from runtime behaviour (env, log banner, a live probe) before starting the next experiment.
+- **Gated git ops need the human online.** A merge/commit that touches `skills/`, `plugins/` or `scripts/` raises the native approval prompt; unattended it times out and the whole command is dropped (not partially run). Before issuing one, say in chat that the prompt is coming (or get an "approve" first), and never re-route the same change through an ungated path — the gate's refusal text says so and it is the house rule.
 - **write_gate false trips** on any command that merely names a gated path (even a read). Use `read_file`, or run a script from disk → `references/write-gate-substring-false-trips.md`. `patch`/`write_file` refuse config.yaml → write a python script in `cache/scratch/`, back up first, then run it. Arm the grant in its own terminal call → `references/write-gate-operations.md`.
 - **A parallel TUI session** (`logs/agent.log` platform=tui) often runs plans written to `~/reports`. Check `git log` before you redo work.
+- **`web_search` empty while `web_extract` works = SearXNG upstream engines, not Firecrawl.** Split scrape vs search before touching containers; `references/web-stack-troubleshooting.md` has the 5-step read-only chain and the fix options.
 
 ## ⚠️ Pre-Write Profile Check (burned 2026-06-09)
 
@@ -222,13 +225,7 @@ Cost: ~20 extra tokens per turn in the system prompt. Negligible.
 
 1. **`hermes gateway restart` SELF-BLOCKS when run from inside the gateway** — it prints `✗ Refusing to restart the gateway from inside the gateway process` (anti-restart-loop guard). Your `terminal` commands ARE children of the gateway cgroup (verify: `systemctl --user status hermes-gateway` shows your shell under the gateway's CGroup tree), so the direct restart always refuses.
 2. **The turn itself is the deadlock.** The gateway traps SIGTERM and drains in-flight work before exiting — and the current conversation turn IS that in-flight work. Every status poll you run spawns a fresh child in the gateway cgroup, resetting the drain. You cannot restart-and-verify within the same turn; the verification keeps the process alive, which blocks the restart from completing. Symptom: `systemctl --user show hermes-gateway -p SubState` stays `stop-sigterm` for as long as you keep polling.
-3. **Fix — schedule a DETACHED out-of-cgroup restart, then end the turn:**
-   ```bash
-   systemd-run --user --on-active=2 --unit=hermes-gw-reload \
-     --description="one-shot gateway reload" \
-     systemctl --user restart hermes-gateway
-   ```
-   This runs the restart from a transient timer unit OUTSIDE the gateway's cgroup, so it survives the gateway (and your shell) being torn down. Confirm it queued: `systemctl --user list-jobs | grep hermes` shows `restart running`. Check the safety net before relying on it: `systemctl --user show hermes-gateway -p Restart,TimeoutStopUSec` — `Restart=always` guarantees relaunch, `TimeoutStopUSec` (default 3min 30s) is the SIGTERM grace before SIGKILL.
+3. **Fix — the user restarts it from an outside shell** (see Standing procedures: the detached `systemd-run --on-active` timer that used to work here is now refused by core's lifecycle guard, which scans the command text regardless of the wrapper). Queue every pending change behind that one restart.
 4. **Then STOP and let the turn end.** The gateway is supervised by **systemd --user** (`~/.config/systemd/user/hermes-gateway.service`), NOT system-level systemd — `systemctl list-units` at system scope finds nothing; use `systemctl --user`. After the turn ends the old process drains+exits, the timer fires, a fresh process (NEW PID) re-reads config.yaml. Tell the user the `default` profile (Telegram/Discord) drops for ~10-30s; `ha-bot`/`voice-changer` are separate units, unaffected.
 5. **Verify on the NEXT turn (fresh process):** `hermes gateway status` shows a NEW Main PID + recent start time; then prove the cap is live by adding a throwaway memory entry — the usage line should now read against the new cap (e.g. `72% — 2,166/3,000`). Remove the probe entry after. Server-side file value is a false-positive for "live"; the memory-tool cap readout is the real proof.
 
@@ -1003,13 +1000,7 @@ ANY config change that the running gateway caches at startup (`memory_char_limit
 2. **`hermes gateway restart` SELF-BLOCKS from inside the gateway** — prints `✗ Refusing to restart the gateway from inside the gateway process` (anti-restart-loop guard). Your `terminal` commands ARE children of the gateway cgroup — verify with `systemctl --user status hermes-gateway` (your shell appears under its CGroup tree). So the direct restart always refuses.
 3. **The turn itself is the deadlock.** The gateway traps SIGTERM and DRAINS in-flight work before exiting — and the current conversation turn IS that in-flight work. Every status poll you run spawns a fresh child in the gateway cgroup, resetting the drain. You CANNOT restart-and-verify in one turn: the verification keeps the process alive, which blocks the restart from completing. Symptom: `systemctl --user show hermes-gateway -p SubState` stays `stop-sigterm` for as long as you keep polling.
 
-**Fix — schedule a DETACHED out-of-cgroup restart, then END THE TURN:**
-```bash
-systemd-run --user --on-active=2 --unit=hermes-gw-reload \
-  --description="one-shot gateway reload" \
-  systemctl --user restart hermes-gateway
-```
-This runs the restart from a transient timer unit OUTSIDE the gateway's cgroup, so it survives the gateway (and your shell) being torn down. Confirm queued: `systemctl --user list-jobs | grep hermes` → `restart running`. Check the safety net before relying on it: `systemctl --user show hermes-gateway -p Restart,TimeoutStopUSec` — `Restart=always` guarantees relaunch; `TimeoutStopUSec` (default 3min 30s) is the SIGTERM grace before SIGKILL. The gateway is supervised by **systemd --user** (`~/.config/systemd/user/hermes-gateway.service`), NOT system-level — `systemctl list-units` at system scope finds nothing; always use `systemctl --user`.
+**Fix — the user runs the restart from an outside shell, then you verify next turn.** The detached `systemd-run --on-active` timer that used to escape the cgroup is now refused by core's lifecycle guard (it scans command text and referenced scripts, wrapper or not) — see Standing procedures; don't spend turns on wrappers. The gateway is supervised by **systemd --user** (`~/.config/systemd/user/hermes-gateway.service`), NOT system-level — `systemctl list-units` at system scope finds nothing; always use `systemctl --user`.
 
 **Then STOP. Verify on the NEXT turn (fresh process):** `hermes gateway status` shows a NEW Main PID + recent start; then prove the change is live via runtime behaviour (memory cap readout, injected-block shape — not the file). Clean up the transient unit afterward: `systemctl --user reset-failed hermes-gw-reload.* ; systemctl --user stop hermes-gw-reload.timer`. Tell the user the `default` profile (Telegram/Discord) drops ~10-30s; `ha-bot`/`voice-changer` are separate units, unaffected. Full worked sequence (config-cache gap + deadlock + detached fix + next-turn verify): `references/gateway-restart-deadlock.md`.
 

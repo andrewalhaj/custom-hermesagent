@@ -9,6 +9,8 @@ Full pipeline for taking a repo public without leaking infrastructure or secrets
 
 ## Hard rules (what counts as a leak)
 
+**Publishing after the first cut: cherry-pick, don't re-squash.** The orphan `public` root hides pre-publication history once; every later re-cut with `commit-tree` collapses the public log back to one commit (Andrew saw a 1-commit repo and asked where the commits went). Routine: `git checkout public && git cherry-pick public-anchor..master && git push origin public:main && git tag -f public-anchor master`. Verify `git rev-parse public^{tree} == master^{tree}` before pushing. Re-squash only when a leak must be erased from public history. Pre-commit gitleaks uses the strict local config but the CI uses the repo's `.gitleaks.toml` — its `root-deploy-path` rule (`/root/<x>`) fires on prose like `<home>/reports/*.md`; write `~/reports` in skills/docs.
+
 Zero tolerance in anything public-facing, including git history:
 - **Work identity**: employer AD/DNS domain, NetBIOS domain, `DOMAIN\user` logon names, work-laptop hostnames (asset-tag shape like `XXX-LT-<serial>`), and personal names/locations — including ones that were only ever *confabulations* being blocked (a reader can't tell). The strict config only catches what's in it: add the employer's domain/hostname/username to `private-domain`/`host-codenames` the day a new employer appears, or the audit stays green while the runbooks leak (caught by external review 2026-10-19 after publish).
 - IPs: public server IPs AND Tailscale CGNAT (the 100.64–127 block, i.e. 100.64.x.x–100.127.x.x)

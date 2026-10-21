@@ -26,6 +26,16 @@ Persistent, searchable knowledge base for everything the agent needs to remember
 
 ## Quick Reference
 
+**Session search (state.db FTS5):** `session_search` ANDs every term — a 10-word natural-language query returns 0 sessions even with a full index (46k rows). Use 2–4 distinctive keywords ("sector boost reranker"), then scroll with session_id + around_message_id. "0 sessions searched" is a query-shape symptom; check `select count(*) from messages_fts` before calling it a bug.
+
+**Adding a Supabase table / embedding ingest (e.g. `session_turns`):**
+1. DDL via the Management API (`scripts/knowledge/sql/<table>.sql`, idempotent IF NOT EXISTS + CREATE OR REPLACE), then `NOTIFY pgrst, 'reload schema'`. The MCP `supabase` server has no token wired; the `.env` `SUPABASE_ACCESS_TOKEN` is the one that works (401 on it = rotated PAT, ask for a fresh one — the service key cannot do DDL).
+2. In the same SQL file: `ENABLE ROW LEVEL SECURITY` + one `FOR ALL TO service_role USING (true) WITH CHECK (true)` policy — mirrors `knowledge`; scripts use the service key so nothing breaks, and the advisor otherwise flags the table CRITICAL.
+3. `_supa_select` is hard-wired to `/rest/v1/knowledge`; other tables go through `_supa_get('/rest/v1/<table>?select=…')` / `_supa_post`. Insert with `?on_conflict=<unique col>` + `Prefer: resolution=ignore-duplicates` so a resumed backfill is idempotent.
+4. Cap each embedded text before the embed call (user_text ≤ 2,000 chars; a 32 KB paste returns HTTP 400 from the embedder and aborts the batch). Resume with `--since-last`, then verify `kept` vs table count by id — a mid-batch reset leaves a gap that the ts watermark skips.
+5. Drop any row whose user or reply text matches credential prefixes (`gh[pousr]_`, `github_pat_`, `sbp_`, `sk-`, `xox[abp]-`, `AKIA`, `eyJ…`) — users paste tokens in chat; sweep the table for the rule after adding it.
+6. Heuristics before any learned junk filter: ≥6 words, not `[`-prefixed, not chatter, not >70% non-alpha, has a reply — measured ~0% junk in the kept sample; a model earns a slot only after a measured residual.
+
 ```bash
 # Search
 python3 ~/.hermes/scripts/knowledge.py search "manifest routing fallback"

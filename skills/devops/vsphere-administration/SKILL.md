@@ -19,10 +19,10 @@ Andrew is learning vSphere on the job. Every answer: **mechanism in 1–3 lines 
 - Fix: login `administrator@vsphere.local` → ☰ Administration → Access Control → Global Permissions → Add → AD domain → group (prefer a group like `vSphere-Admins`) → role → Propagate to children. If administrator@vsphere.local gets the same error, the SSO Administrators group is empty → VCSA shell route.
 
 ## New VM (three decisions: compute, datastore, port group)
-1. Upload the ISO first: Storage view → datastore → Files → Upload Files.
+1. Get the ISO onto a **shared** datastore first. Browse existing datastores' Files tabs for an `ISO`/`<os>_OS` folder before downloading — the media the sibling VMs were built from is usually still there (a 2022 VM's CD/DVD setting in Summary → VM Hardware may still name it). Two traps: `vmimages/tools-isoimages/windows.iso` is VMware Tools (~100 MB), not an installer (4–6 GB); and a host-local datastore (`.<n>_datastore1_Local_`) only shows in the ISO picker when the VM runs on that host — tick the ISO → **Copy to** → the shared datastore (`ISO/` folder) instead of migrating the VM to the host. Upload path if nothing exists: Storage view → datastore → Files → Upload Files.
 2. Right-click cluster → New Virtual Machine → Create new → name + datacenter → compute (cluster; if refused, DRS is off → pick a healthy host) → datastore (most free, default policy) → compatibility default → guest OS family/version.
 3. Customize hardware: right-size small (ALM-class server = 2 vCPU/4 GB/60 GB **thin**), VMXNET3 NIC on the port group the peer servers use (check a sibling VM → Summary → Networks), CD/DVD → Datastore ISO File → **Connect At Power On**.
-4. Power on → Launch Web Console → install OS → Actions → Guest OS → Install VMware Tools → static IP, DNS, domain join, updates.
+4. Power on → Launch Web Console → install OS → Actions → Guest OS → Install VMware Tools (in the guest: mounted DVD → `setup64.exe` → **Typical**; Complete is only for VMs that move between VMware products) → reboot → static IP, DNS, domain join, updates. Tools before anything else: until it's in, the NIC driver, mouse and clean shutdown are all degraded, and vSphere Summary can't show the guest IP.
 
 ## Datastore choice (wizard step 4) — explain "safe" as shared / not overpromised / headroom / blast radius
 - Rule out host-local (`<host> Local Datastore`): no HA or vMotion, VM dies with the host.
@@ -38,6 +38,10 @@ Andrew is learning vSphere on the job. Every answer: **mechanism in 1–3 lines 
 - DTG license server VM = `DTG-LS01` (Andrew's name — generic beats `DTG-ALM`).
 
 ## Console / boot
+- Copying a shared ISO onto the Unity/general datastore is fine despite the one-volume-per-VM convention — that convention is for VM disks; shared media goes in `ISO/` on the shared store, never on a datastore with a warning/alert icon. Check free space (ISO + thin disk growth during install) first.
+- `Time out.` / `→ EFI Network...` at power-on = nothing bootable: either the CD isn't Connected, or the 5-second `Press any key to boot from CD or DVD` prompt was missed (EFI falls through to PXE). Click into the console for focus, Actions → Power → Reset, press a key at the prompt; or tap `Esc` at the logo → Boot Manager → EFI VMware Virtual SATA CDROM. Edit Settings while powered on → Datastore ISO File → Connected if it wasn't.
+- Windows Setup picks for an infra/app server: edition **Standard (Desktop Experience)** unless the hosts are Datacenter-licensed (then Datacenter is free and consistent with siblings — check `winver` on one); Core only for admins who live in PowerShell. Installation type **Custom**, select the unallocated disk, let Setup partition.
+- The web console has **no clipboard** (`isolation.tools.copy/paste.disable` default TRUE per VM). Do the minimum there — VMware Tools, static IP, enable Remote Desktop — then switch to `mstsc` for everything else. Don't set a random-generated local admin password through the console; do it over RDP where the manager → clipboard → server path works, or type a passphrase. Note the console's keyboard layout (`Enforce US Keyboard Layout` button) before typing any password.
 - EFI Boot Manager menu at first power-on = nothing bootable: the disk is empty and the CD has no ISO behind it (still Client Device or not Connected). Edit Settings while powered on → Datastore ISO File → Connected, then pick the SATA CDROM entry in the menu; hit a key at "Press any key" or Reset and retry.
 - Windows guest product key: Datacenter-licensed hosts → AVMA key for the edition, activates against the host; Standard → a VLSC key and one of the 2-per-16-core slots.
 
@@ -46,4 +50,7 @@ Andrew is learning vSphere on the job. Every answer: **mechanism in 1–3 lines 
 - Paginated pickers (datastores, port groups): read every page before choosing; the right option is often on page 2.
 
 ## Pitfalls
+- DTG network facts (subnet/scope, DHCP exclusions, DC/vCenter/ESXi/license-server addresses, installer paths, Siemens customer no.) live in Supabase: memory_search "DTG network facts". Never in this file — it is published.
+- Free-IP method: DNS A records for the block (`Get-DnsServerResourceRecord -ZoneName <zone> -RRType A | ? IPv4 -like '<server-subnet>.*'`) + a 1–254 `Test-Connection -Quiet` sweep from a DC; take a number absent from both, above .20, next to the sibling servers; confirm with `Test-NetConnection` + `arp -a` right before setting. Prefer a DHCP reservation when there is no server exclusion range.
+- Post-join rename is fine (`Rename-Computer` renames the AD object and re-registers DNS); verify `nltest /sc_query:<domain>`, `Resolve-DnsName`, `Get-ADComputer`, delete the stale `WIN-xxxx` A record, move the object out of `Computers` into the servers OU. `Test-ComputerSecureChannel -Repair` if nltest fails.
 - Imaging/cloning a guest that holds location-bound licenses (Siemens ALM keys) kills the license — see skill `siemens-alm-licensing`; move keys out before disk-level work on the VM.

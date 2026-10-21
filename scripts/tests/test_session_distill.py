@@ -3,6 +3,7 @@
 Run: python -m pytest scripts/tests/test_session_distill.py -v
 """
 import json, os, sqlite3, sys
+from urllib.parse import unquote
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -139,3 +140,51 @@ def test_digest_needs_some_signal():
     assert sd.distill_session({'title': 't'}, blank) is None
     opener = [{'role': 'user', 'content': 'tell me about the garden'}, {'role': 'assistant', 'content': 'ok'}]
     assert sd.distill_session({'title': 't'}, opener).startswith('Session: t | unknown-date')
+
+
+@pytest.fixture
+def kb(monkeypatch):
+    """Fake store + lookup + delete; rows is what the 'table' holds before the new digest."""
+    import knowledge, knowledge_maintenance
+    for flag in SLOW_RETRIEVAL_FLAGS:
+        monkeypatch.setenv(flag, '')
+    k = type('KB', (), {'rows': [], 'stored': [], 'deleted': [], 'fail_delete': False})()
+    monkeypatch.setattr(knowledge, 'store', lambda text, tags, **kw: k.stored.append((text, tags)) or 'new1')
+    monkeypatch.setattr(knowledge, '_supa_select', lambda q, **kw: [r for r in k.rows if r['text'].split('\n')[0] in unquote(q)])  # crude server-side filter
+    monkeypatch.setattr(knowledge, 'get_supabase', lambda: ('u', 'k'))
+
+    def delete(url, key, fid, reason):
+        if k.fail_delete:
+            raise OSError('boom')
+        k.deleted.append((fid, reason))
+    monkeypatch.setattr(knowledge_maintenance, 'delete_fact', delete)
+    return k
+
+
+def test_redistill_supersedes_previous_digest_of_same_session(kb):
+    kb.rows = [{'id': 'old1', 'text': 'Session: Live: T | unknown-date\nx'}, {'id': 'new1', 'text': 'x'}]
+    assert sd.store_digest('Session: Live: T | unknown-date\ny', tags='session-digest,session:s1') is True
+    assert kb.stored[0][1] == ['session-digest', 'session:s1']
+    assert kb.deleted == [('old1', 'superseded-by:new1')]  # never deletes the row just stored
+
+
+def test_final_digest_removes_earlier_untagged_live_digest(kb):
+    kb.rows = [{'id': 'live1', 'text': 'Session: Live: T | unknown-date\nold'},
+               {'id': 'other', 'text': 'Session: Live: Other | unknown-date\nz'}]
+    sd.store_digest('Session: T | 2026-10-20\nfinal', tags='session-digest,session:s1')
+    assert kb.deleted == [('live1', 'superseded-by:new1')]
+
+
+def test_delete_failure_does_not_block_storing(kb, capsys):
+    kb.rows = [{'id': 'old1', 'text': 'Session: Live: T | unknown-date\nx'}]
+    kb.fail_delete = True
+    assert sd.store_digest('Session: T | 2026-10-20\nf', tags='session-digest,session:s1') is True
+    assert kb.stored and 'supersede failed' in capsys.readouterr().err
+
+
+def test_callers_tag_digest_with_session_id(env, monkeypatch):
+    add_session(env, 'a', NOW, 'agent_close')
+    seen = []
+    monkeypatch.setattr(sd, 'store_digest', lambda d, tags=sd.TAGS: seen.append(tags) or True)
+    sd.main()
+    assert 'session:a' in seen[0].split(',')
