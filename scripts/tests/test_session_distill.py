@@ -148,9 +148,10 @@ def kb(monkeypatch):
     import knowledge, knowledge_maintenance
     for flag in SLOW_RETRIEVAL_FLAGS:
         monkeypatch.setenv(flag, '')
-    k = type('KB', (), {'rows': [], 'stored': [], 'deleted': [], 'fail_delete': False})()
+    k = type('KB', (), {'rows': [], 'stored': [], 'deleted': [], 'fail_delete': False, 'queries': []})()
     monkeypatch.setattr(knowledge, 'store', lambda text, tags, **kw: k.stored.append((text, tags)) or 'new1')
-    monkeypatch.setattr(knowledge, '_supa_select', lambda q, **kw: [r for r in k.rows if r['text'].split('\n')[0] in unquote(q)])  # crude server-side filter
+    monkeypatch.setattr(knowledge, '_supa_select', lambda q, **kw: k.queries.append(unquote(q)) or [
+        r for r in k.rows if any(f'"{t}"' in unquote(q) for t in r.get('tags', []))])  # crude server-side tag filter
     monkeypatch.setattr(knowledge, 'get_supabase', lambda: ('u', 'k'))
 
     def delete(url, key, fid, reason):
@@ -162,21 +163,27 @@ def kb(monkeypatch):
 
 
 def test_redistill_supersedes_previous_digest_of_same_session(kb):
-    kb.rows = [{'id': 'old1', 'text': 'Session: Live: T | unknown-date\nx'}, {'id': 'new1', 'text': 'x'}]
+    kb.rows = [{'id': 'old1', 'tags': ['session:s1']}, {'id': 'new1', 'tags': ['session:s1']}]
     assert sd.store_digest('Session: Live: T | unknown-date\ny', tags='session-digest,session:s1') is True
     assert kb.stored[0][1] == ['session-digest', 'session:s1']
     assert kb.deleted == [('old1', 'superseded-by:new1')]  # never deletes the row just stored
 
 
-def test_final_digest_removes_earlier_untagged_live_digest(kb):
-    kb.rows = [{'id': 'live1', 'text': 'Session: Live: T | unknown-date\nold'},
-               {'id': 'other', 'text': 'Session: Live: Other | unknown-date\nz'}]
+def test_supersede_ignores_title_so_hostile_title_cannot_wildcard(kb):
+    kb.rows = [{'id': 'mine', 'tags': ['session:s1']}, {'id': 'other', 'tags': ['session:s2']}]
+    sd.store_digest('Session: Live: Foo, (bar) 100% * | unknown-date\nx', tags='session-digest,session:s1')
+    assert kb.deleted == [('mine', 'superseded-by:new1')]
+    assert 'Foo' not in kb.queries[0] and 'like' not in kb.queries[0]
+
+
+def test_untagged_live_digest_is_left_to_age_out(kb):
+    kb.rows = [{'id': 'live1', 'tags': []}]
     sd.store_digest('Session: T | 2026-10-20\nfinal', tags='session-digest,session:s1')
-    assert kb.deleted == [('live1', 'superseded-by:new1')]
+    assert kb.deleted == []
 
 
 def test_delete_failure_does_not_block_storing(kb, capsys):
-    kb.rows = [{'id': 'old1', 'text': 'Session: Live: T | unknown-date\nx'}]
+    kb.rows = [{'id': 'old1', 'tags': ['session:s1']}]
     kb.fail_delete = True
     assert sd.store_digest('Session: T | 2026-10-20\nf', tags='session-digest,session:s1') is True
     assert kb.stored and 'supersede failed' in capsys.readouterr().err

@@ -178,6 +178,13 @@ def _cosine_rerank(hits, query, top_k):
     hits = hits or []
     if not hits:
         return []
+    if env('RERANK_BACKEND') == 'jev':
+        try:
+            judged = _jev_rerank(hits, query, top_k)
+            if judged is not None:
+                return judged
+        except Exception:
+            pass  # vendor slow/down or withheld text: bge below
     try:
         remote = _remote_rerank(hits, query, top_k)
         if remote is not None:
@@ -193,6 +200,31 @@ def _cosine_rerank(hits, query, top_k):
     except Exception:
         pass
     return hits[:top_k]
+
+def _jev_rerank(hits, query, top_k):
+    """Rerank with TypeSafe Jev: one fan-out request, one noul per candidate (knowledge/jev.py holds the question).
+
+    Returns reranked hits, or None to signal fallback to bge: when the query or any candidate is work-tenant text
+    (never sent to the vendor) or the response has the wrong shape. rerank_raw = logit(noul) keeps the >0 ≈ relevant
+    convention the abstention check relies on.
+    """
+    from knowledge import jev
+    docs = [(h.get('text') or '')[:2000] for h in hits]
+    if jev.withheld(query, *docs):
+        return None
+    questions = {f'c{i}': jev.rerank_question(d) for i, d in enumerate(docs)}
+    answers = jev.ask({'query': query}, questions, timeout=jev.RERANK_TIMEOUT_S)
+    if len(answers) != len(hits):
+        return None
+    scores = [min(max(float(answers[f'c{i}']['noul']), 1e-4), 1 - 1e-4) for i in range(len(hits))]
+    smin, smax = min(scores), max(scores)
+    srange = smax - smin if smax != smin else 1.0
+    for h, p in zip(hits, scores):
+        h['rerank_raw'] = round(math.log(p / (1 - p)), 4)
+        h['score'] = round((p - smin) / srange, 4)
+    hits.sort(key=lambda h: h['score'], reverse=True)
+    return hits[:top_k]
+
 
 def _remote_rerank(hits, query, top_k):
     """Rerank via the LH02 llama-server /v1/rerank endpoint.

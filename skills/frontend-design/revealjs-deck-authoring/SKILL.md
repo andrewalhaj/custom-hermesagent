@@ -56,7 +56,7 @@ Write a full spec file (`~/reports/<deck>-spec.md`: theme tokens inline, per-sli
 
 **Launch flags when running as root (verified 2026-10-12):** `--dangerously-skip-permissions` is refused outright under root/sudo ("cannot be used with root/sudo privileges for security reasons") — the worker exits 1 before doing anything. Use a scoped allow-list instead: `--allowedTools "Read" "Write" "Edit" "Bash(python3:*)" "Bash(ls:*)"`. This ran a full deck+script build to completion with no permission prompts.
 
-**Spec content for text-only decks (no diagram), 2026-10-12:** bake the two recurring worker defects into the spec itself as verbatim requirements — the `html/body { background: var(--paper) }` rule and `align-self: flex-start` on chips — plus the flex-fix CSS and a python verification block with required/banned strings. The dtg-findings build shipped clean on the first run with all of these specced; the earlier same-day build without them shipped both defects.
+**Spec content for text-only decks (no diagram), 2026-10-12:** bake the two recurring worker defects into the spec itself as verbatim requirements — the `html/body { background: var(--paper) }` rule and `align-self: flex-start` on chips — plus the flex-fix CSS and a python verification block with required/banned strings. The findings-deck build shipped clean on the first run with all of these specced; the earlier same-day build without them shipped both defects.
 
 **Note-leak check false positive:** a worker may legitimately render the same sentence as BOTH a visible pressed callout and the `aside.notes` summary. The leak check (note phrase found in visible innerText) fires on this. Before treating it as base64-adjacent corruption, inspect the section: if the visible copy is a properly-structured element (own div, ASIDE still last child, markup intact), it's duplicate content by design, not corruption — keep or edit editorially, don't "fix."
 
@@ -140,19 +140,19 @@ When a diagram slide is "hard to read," the root cause is usually **aspect-ratio
 
 ## Brand watermark (tasteful, all slides)
 
-Proven pattern (JD logo, 2026-07-09):
+Proven pattern (company logo, 2026-07-09):
 
-1. **Source the official mark from the company site.** The homepage often has NO logo img (CSS/JS-injected); check secondary pages (`who_we_are.html` had `jdlogo-round-white.png` when index had nothing). Guessing asset paths 404s — grep real page HTML for `src=` instead.
+1. **Source the official mark from the company site.** The homepage often has NO logo img (CSS/JS-injected); check secondary pages (an about-us page had the round white logo PNG when index had nothing). Guessing asset paths 404s — grep real page HTML for `src=` instead.
 2. **White-on-transparent PNGs are invisible to vision tools** — composite onto a dark background with PIL (`Image.alpha_composite` over the deck's ink color) before `vision_analyze`, or you'll wrongly conclude the file is blank.
 3. **Tint to the theme palette, preserve alpha:** iterate pixels, replace RGB with the theme tan, keep A.
 4. **Static single-tint has a visibility ceiling (superseded 2026-07-09).** Andrew asked for "slightly more visible" and the static mark plateaued at 4-4.5/7: brightening for dark slides washes it out on light ones and vice versa. Use the ADAPTIVE pattern:
    - Tint to mid-ramp tan (`#a67c52`), ~78px tall, `opacity:0.88`.
    - Base CSS (light slides): `filter: brightness(0.82) drop-shadow(0 2px 5px rgba(115,90,58,0.35)); transition: filter 0.3s ease;`
-   - Dark-slide class: `.jd-watermark.on-dark { filter: brightness(1.35) drop-shadow(0 2px 5px rgba(0,0,0,0.45)); }`
+   - Dark-slide class: `.brand-watermark.on-dark { filter: brightness(1.35) drop-shadow(0 2px 5px rgba(0,0,0,0.45)); }`
    - Toggle via Reveal hooks (before `Reveal.initialize`): `Reveal.on('ready'|'slidechanged', () => wm.classList.toggle('on-dark', Reveal.getCurrentSlide().classList.contains('dark-slide')))`.
 5. **CSS:** `position:fixed` (outside `.reveal` scaling), bottom-left, `pointer-events:none`, `user-select:none`, `aria-hidden="true"`, z-index above slides but below controls. Place opposite corner from the slide counter. Insert the `<img>` right after `<body>`, NOT inside `.reveal`.
 6. **Tune with a numeric vision loop:** ask the vision model for a 1-7 visibility rating per background (target ~5 = noticed in 2-3s, clearly intentional, not competing). Iterate opacity/size/filter until BOTH light and dark slides score ~5. Verify: `getBoundingClientRect` for position/size, `naturalWidth > 0` for load, class-toggle across title → light → divider transitions.
-7. Tinted JD asset lives at `~/reports/jdlogo-tan.png`.
+7. The tinted logo asset lives under `~/reports/`.
 
 ## Companion interactive demos (proven 2026-07-09)
 

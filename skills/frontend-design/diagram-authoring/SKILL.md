@@ -39,7 +39,7 @@ Standing rules (all tiers):
 
 ## Adapting a vendor reference diagram (CAF, Well-Architected, etc.)
 
-1. **Ask which environment** when he has more than one in play (DTG work tenant vs. the Hermes homelab) — the diagram's vendor branding does not settle it. One `clarify` call with both questions: which environment, and what is actually in it.
+1. **Ask which environment** when he has more than one in play (the work tenant vs. the Hermes homelab) — the diagram's vendor branding does not settle it. One `clarify` call with both questions: which environment, and what is actually in it.
 2. **Inventory from memory first, then him.** `memory_search` the environment; take his answer as the inventory; mark everything else **unknown** in the artifact rather than filling in plausible components. He prefers a sparse honest diagram over a complete invented one.
 3. **Right-size before mapping.** A reference diagram drawn for an enterprise maps onto a small tenant as slots that are "already exists", "turn on, don't build", or "skip until a trigger". Say which per slot (table in the `.md`), with the trigger that would un-skip it.
 4. **Write the `.md` first** (architecture → `.md`), with the Mermaid block, a slot-by-slot table, an ordered build sequence, open questions, and a one-paragraph mechanism explanation (he learns by restating the mechanism; give him one to restate).

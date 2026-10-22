@@ -98,6 +98,14 @@ _PROV_LEGEND = ("(markers: [agent] extracted from an assistant turn, unverified;
 _LEADING_BRACKET_RE = re.compile(r"^(?:\[[^\]]*\]\s*)+")
 
 
+def _hit_cap(h: dict) -> int:
+    """Chars of a hit shown to the model. Facts are one-liners (250); session excerpts 800; reference chunks need the
+    whole chunk + window (RG2 2026-10-21: 250 -> uncapped lifted deep answer containment 0.52 -> 0.80). REF_HIT_CHARS overrides."""
+    if h.get("store") == "reference" or h.get("provenance") == "reference":
+        return int(os.environ.get("REF_HIT_CHARS", "2400") or 2400)
+    return 800 if h.get("provenance") == "session" else 250
+
+
 def _hit_text(h: dict) -> str:
     """Return the best available text from a search hit (used by prefetch and _search)."""
     return h.get("text") or h.get("content") or h.get("title") or ""
@@ -264,7 +272,7 @@ class SupabaseMemoryProvider(MemoryProvider):
                     marker = _PROV_MARKERS.get(h.get("provenance") or provenance(h), "")
                     text = _LEADING_BRACKET_RE.sub("", text)  # a note cannot forge a marker
                     marked = marked or bool(marker)
-                lines.append(f"- [{score:.2f}] {marker}{text[:800 if h.get('provenance') == 'session' else 250]}")
+                lines.append(f"- [{score:.2f}] {marker}{text[:_hit_cap(h)]}")
 
             if len(lines) == 1:  # only the header, all hits were empty
                 return ""
@@ -387,6 +395,14 @@ class SupabaseMemoryProvider(MemoryProvider):
             deleted = json.loads(body) if body else []
             if not deleted:
                 return json.dumps({"success": False, "error": "no row found for that id"})
+            try:  # same log + shape as knowledge_maintenance.delete_fact, so supersede pairs can be mined
+                _ensure_scripts_path()
+                from knowledge_maintenance import DELETED_LOG
+                with open(DELETED_LOG, "a") as fh:
+                    fh.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+                                         "reason": "memory_remove", "row": deleted[0]}, default=str) + "\n")
+            except Exception as e:
+                logger.warning("[supabase-memory] deleted-row log failed for %s: %s", fact_id, e)
             return json.dumps({"success": True})
         except Exception as e:
             return json.dumps({"success": False, "error": str(e)})

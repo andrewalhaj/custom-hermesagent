@@ -15,6 +15,25 @@ KNN_GATE_THRESHOLD = float(os.environ.get('KNN_GATE_THRESHOLD', '0.92'))
 # Near-dup supersede only for short facts: at >=0.92 every short pair in a 150-row dry run was a rewording,
 # but parallel session digests (same template, different rows) reach 0.93-0.99 while being distinct.
 KNN_MAX_CHARS = 300
+# Supersede judge (SUPERSEDE_JUDGE=true): below the cosine dedup line but still same-neighbourhood, ask Jev whether the new row
+# makes the old one stale. Questions, band and thresholds: knowledge/jev.py.
+def _judge_min_cos():
+    from knowledge import jev
+    return jev.SUPERSEDE_MIN_COS
+
+
+def _judge_supersedes(old_text, new_text):
+    """True when Jev says the rows share a subject AND new_text supersedes old_text. Fails closed on any error or withheld text."""
+    try:
+        from knowledge import jev
+        if jev.withheld(old_text, new_text):
+            return False
+        a = jev.ask({'old_fact': old_text, 'new_fact': new_text}, jev.SUPERSEDE_QUESTIONS)
+        same, sup = float(a['same_subject']['noul']), float(a['supersedes']['noul'])
+        _coldstore_log(None, 'supersede-judge', f'same={same:.2f}:p={sup:.2f}:thr={jev.SUPERSEDE_THRESHOLD}', '')
+        return same >= jev.SUPERSEDE_THRESHOLD and sup >= jev.SUPERSEDE_THRESHOLD
+    except Exception:
+        return False
 
 
 def _as_tags(val):
@@ -126,14 +145,16 @@ def _knn_gate(text, vector):
         ids = ','.join(json.dumps(r['id']) for r in hits or [])
         if not ids:
             return None, None
-        best, best_id = 0.0, None
-        for r in _supa_select(f'select=id,vector&id=in.({ids})'):
+        best, best_id, best_text = 0.0, None, ''
+        for r in _supa_select(f'select=id,vector,text&id=in.({ids})'):
             v = r['vector']
             sim = _cosine(vector, json.loads(v) if isinstance(v, str) else v)
             if sim > best:
-                best, best_id = sim, r['id']
+                best, best_id, best_text = sim, r['id'], r.get('text') or ''
         if best >= KNN_GATE_THRESHOLD:
             return 'near', best_id
+        if flag('SUPERSEDE_JUDGE') and best >= _judge_min_cos() and _judge_supersedes(best_text, text):
+            return 'judged', best_id
     except Exception:
         pass
     return None, None
@@ -150,6 +171,14 @@ def _classify_sector(text):
     if flag('KNOWLEDGE_SKIP_SECTOR_CLASSIFY'):
         return []
     try:
+        from knowledge.config import env as _env
+        if _env('SECTOR_BACKEND', 'local') == 'jev':  # jev only when the deployment opts in (.env)
+            try:
+                from knowledge import jev
+                if not jev.withheld(text):
+                    return jev.classify_sector(text)[0]
+            except Exception:
+                pass  # vendor error -> local classifier, same as every other judge
         from knowledge.classifier import classify
         return classify(text) or []
     except Exception:
@@ -204,14 +233,16 @@ def store(text, tags=None, priority='normal', source='', provenance=None):
         'sector_path': _classify_sector(text) or None,
     }
     _supa_insert(row)
-    if kind == 'near' and _supersede_refused(dup_id, row):
+    if kind in ('near', 'judged') and _supersede_refused(dup_id, row):
         _coldstore_log(entry_id, 'knn-dedup', f'supersede-refused:old={dup_id}:rank', source)
-    elif kind == 'near':
-        # The newer statement wins ("port is 8081" replaces "port is 8080"); the old row is backed up first.
+    elif kind in ('near', 'judged'):
+        # The newer statement wins ("port is 8081" replaces "port is 8080"); the old row is backed up first
+        # (knowledge_db/deleted_facts.jsonl — scripts/jev_restore.py replays it).
+        reason = f'superseded-by:{entry_id}' if kind == 'near' else f'jev-supersede:{entry_id}'
         try:
             from knowledge_maintenance import delete_fact
-            delete_fact(*get_supabase(), dup_id, reason=f'superseded-by:{entry_id}')
-            _coldstore_log(entry_id, 'knn-dedup', f'supersede:cos>={KNN_GATE_THRESHOLD}:old={dup_id}', source)
+            delete_fact(*get_supabase(), dup_id, reason=reason)
+            _coldstore_log(entry_id, 'knn-dedup', f'supersede:{"cos>=" + str(KNN_GATE_THRESHOLD) if kind == "near" else "judge"}:old={dup_id}', source)
         except Exception as e:
             _coldstore_log(entry_id, 'knn-dedup', f'supersede-failed:old={dup_id}:{e}', source)
     return row['id']

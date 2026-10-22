@@ -24,7 +24,7 @@ BENCH = os.path.join(HERMES_HOME, "knowledge_db", "benchmark_recall.json")
 PLUGIN = os.path.join(HERMES_HOME, "plugins", "supabase", "__init__.py")
 AGENT_DIR = os.environ.get("HERMES_AGENT_DIR", "/usr/local/lib/hermes-agent")  # provides agent.memory_provider
 # Retrieval-behaviour flags only (no secrets/URLs). Extend when new flags ship.
-FLAGS = ("RERANK", "SECTOR_BOOST", "SECTOR_FILTER", "QUERY_EXPAND", "BFULL_QUERY_EXPAND", "METADATA_FILTER",
+FLAGS = ("RERANK", "SECTOR_FILTER", "QUERY_EXPAND", "BFULL_QUERY_EXPAND", "METADATA_FILTER",
          "REF_CHUNKS", "REF_CHUNKS_MAX_SLOTS", "REF_RESERVED_SLOTS", "DIGEST_MAX_SLOTS", "PROV_LABELS",
          "SUPABASE_PREFETCH_TIMEOUT_S", "RECALL_WIDE", "SESSION_STORE")
 
@@ -82,8 +82,26 @@ def score(rows, prefetch, top=3):
         rank = next((i + 1 for i, it in enumerate(its) if any(s in norm(it) for s in subs)), None)
         res.append({"question": r["question"], "source": r["source"], "source_type": r["source_type"], "group": r.get("group"),
                     "hit": any(s in nb for s in subs), "rank": rank, "empty": not block, "n_items": len(its),
-                    "latency_s": round(dt, 2), "top": [it[:140] for it in its[:top]]})
+                    "latency_s": round(dt, 2), "top": [it[:140] for it in its[:top]], "block": block})
     return res
+
+
+def judge(res):
+    """Second scoring column: Jev's p(recalled block answers the question). Gold substring stays the primary metric;
+    this scores the questions gold cannot (open-ended) and reports agreement with gold where both exist."""
+    from knowledge import jev
+    for x in res:
+        try:
+            x["jev"] = round(float(jev.ask({"question": x["question"]}, {"a": jev.recall_judge_question(x["block"])}, timeout=20)["a"]["noul"]), 3)
+        except Exception as e:
+            x["jev"] = None
+            print(f"judge failed: {e}", file=sys.stderr)
+    both = [x for x in res if x["jev"] is not None]
+    agree = sum((x["jev"] >= 0.5) == x["hit"] for x in both)
+    return {"n": len(both), "mean": round(sum(x["jev"] for x in both) / len(both), 4) if both else None,
+            "agree_with_gold": round(agree / len(both), 4) if both else None,
+            "judge_yes_gold_miss": [x["question"] for x in both if x["jev"] >= 0.5 and not x["hit"]],
+            "judge_no_gold_hit": [x["question"] for x in both if x["jev"] < 0.5 and x["hit"]]}
 
 
 def summarize(res, boot, seed):
@@ -100,6 +118,13 @@ def summarize(res, boot, seed):
     return out
 
 
+def print_summary(s):
+    for name in ("all", "knowledge", "session", "paraphrase"):
+        if name in s:  # summarize() omits empty buckets
+            x = s[name]
+            print(f"{name:10s} hit {x['hits']}/{x['n']} = {x['rate']:.1%}  95% CI [{x['ci95'][0]:.1%}, {x['ci95'][1]:.1%}]")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--bench", default=BENCH)
@@ -108,6 +133,7 @@ def main(argv=None):
     ap.add_argument("--boot", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--top", type=int, default=3)
+    ap.add_argument("--judge", action="store_true", help="add a Jev scoring column (offline, ~$0.001/question)")
     a = ap.parse_args(argv)
 
     rows = json.load(open(a.bench))
@@ -120,9 +146,13 @@ def main(argv=None):
 
     res = score(rows, prefetch, a.top)
     s = summarize(res, a.boot, a.seed)
-    for name in ("all", "knowledge", "session"):
-        x = s[name]
-        print(f"{name:9s} hit {x['hits']}/{x['n']} = {x['rate']:.1%}  95% CI [{x['ci95'][0]:.1%}, {x['ci95'][1]:.1%}]")
+    print_summary(s)
+    if a.judge:
+        s["jev"] = j = judge(res)
+        print(f"jev judge  mean p={j['mean']}  agree with gold {j['agree_with_gold']:.1%} (n={j['n']})  "
+              f"judge-yes/gold-miss {len(j['judge_yes_gold_miss'])}  judge-no/gold-hit {len(j['judge_no_gold_hit'])}")
+    for x in res:
+        x.pop("block", None)  # not for the report file
     print(f"empty blocks: {sum(x['empty'] for x in res)}  median latency: "
           f"{sorted(x['latency_s'] for x in res)[len(res) // 2]}s")
     for i, x in enumerate(res, 1):

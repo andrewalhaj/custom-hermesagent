@@ -115,12 +115,21 @@ read at startup); the running process had held it in memory since the Jul 8 rota
 the last rotation before regenerating — restoring a rotation-era backup may revert the
 credential to its pre-rotation value; tell the user which password is now live.
 
-**Restarting a service from INSIDE the gateway session:** direct `systemctl restart` is
-blocked (SIGTERM propagates), and inline `systemd-run`/`setsid`/`nohup` wrappers are blocked
-by the foreground guard. Working pattern: write a one-shot script to disk that does
-restart + sleep + health-check + writes results to a /tmp file, then run it via
-`terminal(background=true)` and read the result file. (Only applies to sibling services —
-the gateway itself still requires a genuinely external shell.)
+**Restarting a service from INSIDE the gateway session.** Sibling services (kb-daemon, dispatcher)
+restart with a plain `systemctl --user restart <unit>` followed by `is-active` + a `/proc/<pid>/environ`
+read. The gateway itself cannot be restarted by a direct `systemctl restart` from its own session (the
+SIGTERM kills the caller) — trigger the detached oneshot unit instead:
+```bash
+systemctl --user start --no-block hermes-gw-restart.service   # sleeps 5 s, then restarts hermes-gateway outside the gateway's cgroup
+```
+`--no-block` is required: `systemctl start` on a oneshot waits for it to finish, and its job is to kill the
+session that called it, so without the flag the terminal call hangs to its timeout (the restart still
+happens). The reply you send in the same turn goes out before the 5 s delay. Before triggering: no
+delegate children running (a restart kills them), and the `.env`/drop-in diff is exactly what you meant
+(`diff <backup> <live>` → the one line). After the session comes back, prove the change landed from the
+NEW process: fresh `ActiveEnterTimestamp`, `/proc/<MainPID>/environ` shows the flag you changed, journal has
+no Traceback. A drop-in edit alone changes `systemctl show`'s view after `daemon-reload` but not the running
+process — dead flags persist in the live env until the restart, so say which you verified.
 
 ## Pattern: Placeholder Values
 

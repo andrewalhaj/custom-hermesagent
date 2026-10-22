@@ -18,7 +18,7 @@ The knowledge store supports sector-based retrieval ranking via Fibonacci-weight
 > first, then triage the classes in § Audit **plus a superseded-fact pass** (the store is the memory
 > since refactor step 7.3: a newer dated fact that contradicts an older one = delete the older,
 > cite both ids); (2) sector_path coverage check — centroid classifier only, abstains are fine;
-> (3) verify SECTOR_BOOST live on hermes-gateway + hermes-kb-daemon (2 services, not 3);
+> (3) verify RERANK live on hermes-gateway + hermes-kb-daemon (2 services, not 3; SECTOR_BOOST removed 2026-10-19);
 > (4) `bench_reground.py` then `from knowledge.eval import run; run()` → core MRR within CI of
 > 0.9227 (post-refactor 0.9064 at n=62) and abstention 4/4. Do NOT ask "which one do you mean".
 > **When to run one (triggers, not a calendar):** after any change under `scripts/knowledge/` or
@@ -129,8 +129,6 @@ Tested against 15 queries with known answers. Same benchmark set across all arch
 Set in systemd drop-ins at `~/.config/systemd/user/hermes-*.service.d/retrieval-flags.conf`:
 
 ```
-SECTOR_BOOST=true       # Fibonacci same-sector multiplier (100% P@5)
-GRAPH_TRAVERSE=true     # Neo4j graph confirmatory boost
 SECTOR_FILTER=false     # OFF — 87% P@5, loses facts on misclassification
 LAYERED_RETRIEVAL=false # OFF — 80% P@5
 GRAPH_EXPAND=false      # OFF — pushes correct facts to rank 11+
@@ -146,8 +144,6 @@ Drop-in files survive reboots. Apply to each service that calls `scripts/knowled
 mkdir -p ~/.config/systemd/user/hermes-gateway.service.d
 cat > ~/.config/systemd/user/hermes-gateway.service.d/retrieval-flags.conf << 'EOF'
 [Service]
-Environment="SECTOR_BOOST=true"
-Environment="GRAPH_TRAVERSE=true"
 EOF
 
 # Reload and restart
@@ -160,8 +156,8 @@ Repeat for `hermes-kb-daemon`. (`hermes-gateway-ha-bot` was decommissioned 2026-
 ### Verify
 
 ```bash
-systemctl --user show hermes-gateway | grep Environment | grep SECTOR_BOOST
-# Output: Environment=SECTOR_BOOST=true
+systemctl --user show hermes-gateway | grep Environment | grep RERANK
+# Output: Environment=RERANK=true
 ```
 
 ## Classifying facts
@@ -198,7 +194,7 @@ There are TWO classifiers, and they are NOT equivalent:
 - **QUERIES** are classified at search time via `_detect_query_sector()` — this is correct and works.
 - **FACTS** get sector_path from webhooks at store time OR from the auto-classify hook. Both use centroid classification (`classifier.py`), not the keyword query classifier.
 - **Batch keyword classification of existing facts is PROHIBITED** by this skill. A one-off backfill was done 2026-06-26 (73 facts classified via keyword/pattern rules by Claude Code, 187/187 now have `sector_path`). The benchmark was NOT re-run after this backfill — P@5 is UNVERIFIED. If retrieval quality drops, clear ALL sector_paths to `[]` and let auto-classify + webhooks re-accumulate over time.
-- `SECTOR_BOOST=true` multiplies same-sector facts ×3.70. Non-destructive — unclassified facts still surface through RRF merge.
+- `SECTOR_BOOST` (×3.70 same-sector multiplier) was removed 2026-10-19 — no-op under RERANK. Unclassified facts surface through RRF merge.
 
 ### Recovery benchmark
 
@@ -276,7 +272,7 @@ PY=/usr/local/lib/hermes-agent/venv/bin/python3   # gateway venv — bare python
 # 1. AFTER cleanup, BEFORE benchmark — mechanical re-grounding (exit 1 = dead core substring, fix first):
 $PY bench_reground.py
 # 2. v2 benchmark (~1 min at n=62). Export the retrieval + Supabase + embed vars from the dotenv
-#    first (set -a; . <(grep -E '^(RERANK|RERANK_REMOTE_URL|SECTOR_BOOST|SUPABASE_URL|SUPABASE_SERVICE_KEY|EMBED[A-Z_]*|EMBEDDING[A-Z_]*)=' ~/.hermes/.env); set +a)
+#    first (set -a; . <(grep -E '^(RERANK|RERANK_REMOTE_URL|SUPABASE_URL|SUPABASE_SERVICE_KEY|EMBED[A-Z_]*|EMBEDDING[A-Z_]*)=' ~/.hermes/.env); set +a)
 #    — the gateway loads its own env, a bare shell does not, and RERANK unset = a 0.74-MRR run you'll misread as a regression.
 HF_HUB_OFFLINE=1 $PY -u -c "from knowledge.eval import run; run()" > ~/.hermes/run/sb_bench_<date>.log 2>&1
 ```
@@ -285,7 +281,7 @@ Pass criteria: core MRR within CI of 0.9227, abstention 4/4, no dead core substr
 
 - **`python3 scripts/knowledge/eval.py` prints NOTHING and exits 0** — it's a library with no `__main__`. Silent success-looking no-op (cost several turns 2026-07-09). Correct invocation from `~/.hermes/scripts`:
   ```bash
-  SECTOR_BOOST=true GRAPH_TRAVERSE=true HF_HUB_OFFLINE=1 python3 -u -c "
+  HF_HUB_OFFLINE=1 python3 -u -c "
   from knowledge.eval import eval_benchmark
   r = eval_benchmark()
   print(f\"P@5: {r['p@5']*100:.1f}%  MRR: {r['MRR']:.4f}  ({r['passed']}/{r['total']})\")

@@ -59,6 +59,8 @@ def _prefetch_with_future(provider, future):
     """Run prefetch() with ThreadPoolExecutor replaced by a mock pool."""
     pool = _mk_pool(future)
     with ExitStack() as stack:
+        # these tests describe the default prefetch path; the gateway's live env sets RECALL_WIDE=true
+        stack.enter_context(patch.dict(os.environ, {"RECALL_WIDE": "", "SESSION_STORE": ""}))
         stack.enter_context(
             patch("concurrent.futures.ThreadPoolExecutor", return_value=pool)
         )

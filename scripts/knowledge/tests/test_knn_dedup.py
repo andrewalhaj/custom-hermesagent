@@ -30,7 +30,7 @@ def table(monkeypatch, tmp_path):
         if q.startswith("select=id&limit=1&body_hash=eq."):
             h = q.rsplit(".", 1)[1]
             return [{"id": i} for i, r in rows.items() if r["body_hash"] == h][:1]
-        if q.startswith("select=id,vector&id=in."):
+        if q.startswith("select=id,vector,text&id=in."):
             ids = json.loads("[" + q.split("in.(", 1)[1][:-1] + "]")
             return [{"id": i, "vector": json.dumps(rows[i]["vector"])} for i in ids if i in rows]
         if q.startswith("select=id,tags,source,text&id=eq."):  # supersede guard's read of the old row

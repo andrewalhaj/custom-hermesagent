@@ -5,7 +5,7 @@ description: "Use when writing Claude Code hooks/installers on Windows"
 
 # Claude Code hooks + installers on native Windows
 
-Use when writing or debugging Claude Code hooks, settings merges, or PowerShell installers for Windows. Lessons from the DTG laptop parity add-on (2026-10-14); each was found live on Windows after Linux tests passed.
+Use when writing or debugging Claude Code hooks, settings merges, or PowerShell installers for Windows. Lessons from a work-laptop parity add-on (2026-10-14); each was found live on Windows after Linux tests passed.
 
 ## Hook output schemas (check https://code.claude.com/docs/en/hooks first)
 - **Stop hook block**: `decision`/`reason` must be TOP-LEVEL JSON (`{"decision":"block","reason":...}`). Nested inside `hookSpecificOutput` it is silently ignored. Keep the `stop_hook_active` loop guard.
@@ -32,7 +32,7 @@ Use when writing or debugging Claude Code hooks, settings merges, or PowerShell 
 - `-WhatIf` prints a backup folder name without creating it - don't mistake it for a second run.
 - Rollback must restore the OLDEST backup (the pre-install original); newest is wrong after a re-run.
 - Plugins installed via `/plugin install` from inside a project can land at `scope: project`; enable at user scope (`enabledPlugins`) if they must load everywhere.
-- `extraKnownMarketplaces` is an OBJECT keyed by marketplace name (`{"dtg-tools":{"source":{"source":"git","url":"https://...git"}}}` or `{"source":"github","repo":"org/repo"}`), not an array; `enabledPlugins` is an object `{"plugin@marketplace": true}`. Subagents repeatedly ship arrays or invented keys (`sourceUrl`, `sourceType`) that Claude Code silently ignores, so the plugin never loads. Before shipping any settings template or merge, diff its shape against https://code.claude.com/docs/en/settings-reference. When merging, leave existing values untouched and add a key only when absent.
+- `extraKnownMarketplaces` is an OBJECT keyed by marketplace name (`{"team-tools":{"source":{"source":"git","url":"https://...git"}}}` or `{"source":"github","repo":"org/repo"}`), not an array; `enabledPlugins` is an object `{"plugin@marketplace": true}`. Subagents repeatedly ship arrays or invented keys (`sourceUrl`, `sourceType`) that Claude Code silently ignores, so the plugin never loads. Before shipping any settings template or merge, diff its shape against https://code.claude.com/docs/en/settings-reference. When merging, leave existing values untouched and add a key only when absent.
 - Settings JSON allows no comment keys (`"//"`, `"_comment"`); put placement notes in the README. Managed settings on Windows: `C:\Program Files\ClaudeCode\managed-settings.json`, HKLM `SOFTWARE\Policies\ClaudeCode` value `Settings` (Intune/GPO), or server-managed settings in the claude.ai admin console. Repo-level `extraKnownMarketplaces` applies only after the user trusts the folder.
 - `claude plugin validate` passing does not check settings templates, the hook's tool matcher, or Windows behaviour. Audit those against the docs separately.
 

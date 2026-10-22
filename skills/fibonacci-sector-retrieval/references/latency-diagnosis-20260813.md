@@ -9,7 +9,7 @@ Full record of the pass that killed the "23s/query is embed+graph" myth. Reusabl
 | RERANK=true (dotenv contamination) | 9–58s |
 | RERANK=false, all mandated flags | **0.5–1.2s** |
 | GRAPH_TRAVERSE share | ~0.5s (6%) — identical top-5 on/off, keep ON |
-| embed round-trip (Ollama MS01, model warm) | ~0.2s |
+| embed round-trip (Ollama on the Mini, model warm) | ~0.2s |
 
 Root cause: `RERANK=true` on line 1 of `~/.hermes/.env`. Cross-encoder (`mxbai-rerank-base-v1`, `_cosine_rerank` in search.py) runs CPU-bound `predict()` over (query, hit-text) pairs; cost scales with candidate text length → large per-query variance (9s vs 58s) that LOOKS like a data-dependent retrieval problem but isn't.
 

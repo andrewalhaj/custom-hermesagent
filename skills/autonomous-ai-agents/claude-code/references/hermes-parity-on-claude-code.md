@@ -66,7 +66,7 @@ Do not copy wholesale.
 Fan the build out to parallel children with a staging-dir contract: `cc-parity/{identity,hooks,agents,mcp,skills}/`, each child writing only its own subfolder. An integrator runs afterwards to build the installer, the merged settings fragments, the README, the checklist section and the zip. When the user approves or adds scope mid-build, steer the running child rather than respawning it. A steer can arrive too late (it comes back as `missed_steer`), so the integrator checks that every steer actually landed.
 
 Parent review before integration (each child's report is a claim):
-- grep the whole staging tree for removed concepts (`matt|approv`, `hermes`) and for proper names or facts the user never supplied; children invent specifics (e.g. a manager's surname on an "approved by" line) to fill templates.
+- grep the whole staging tree for removed concepts (`<manager-name>|approv`, `hermes`) and for proper names or facts the user never supplied; children invent specifics (e.g. a manager's surname on an "approved by" line) to fill templates.
 - Re-run the ASCII + leak scans and the test suite yourself; read the settings fragments.
 - Diff data files children touched (CSV, JSON datasets) against the source: a child under a zero-hit scan rule will alter legitimate data to dodge a substring match (a font name containing a banned word). Restore the data and whitelist the hit instead.
 - Write the defects to `cc-parity/INTEGRATION-FIXES.md` so the integrator applies them, instead of patching children's files piecemeal.

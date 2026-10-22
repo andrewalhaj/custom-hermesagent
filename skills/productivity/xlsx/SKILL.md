@@ -98,7 +98,9 @@ Author the JSON spec with `write_file`, inspect script JSON output with
    `column_widths`, `row_heights`, `merges`, `freeze_panes`,
    `autofilter`, `conditional_formats` (cell_is rules and color
    scales), `charts` (bar/line/pie from cell ranges),
-   `validations` (list dropdowns), `tables` (native Excel tables with
+   `validations` (list dropdowns — each needs `range` and `formula1`
+   as a quoted comma list, e.g. `"formula1": "\"Yes,No\""`; there is no
+   `options` key, the script fails with `'formula1'`), `tables` (native Excel tables with
    a style name), and `protection`. Workbook-level `defined_names`
    maps names to refs. Cell objects also take `hyperlink` and `note`.
    Typed values: JSON numbers/bools

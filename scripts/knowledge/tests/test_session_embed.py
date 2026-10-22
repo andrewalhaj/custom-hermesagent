@@ -51,10 +51,10 @@ def db():
     d = make_db()
     d.execute("INSERT INTO sessions VALUES ('s1','telegram','Gateway'), ('s2','cron','Cron'), ('s3','cli',NULL)")
     now = time.time()
-    add(d, 's1', 'user', GOOD, now - 100)
-    add(d, 's1', 'assistant', None, now - 99)          # tool-only assistant row
-    add(d, 's1', 'assistant', 'the reply', now - 98)
-    add(d, 's1', 'user', GOOD + ' again', now - 50)    # next user turn with no reply
+    add(d, 's1', 'user', GOOD, now - 7300)
+    add(d, 's1', 'assistant', None, now - 7299)          # tool-only assistant row
+    add(d, 's1', 'assistant', 'the reply', now - 7298)
+    add(d, 's1', 'user', GOOD + ' again', now - 7250)  # next user turn with no reply (older than the pending grace)
     add(d, 's2', 'user', GOOD, now - 100)              # wrong source
     add(d, 's3', 'user', GOOD, now - 40 * 86400)       # older than --days
     return d
@@ -74,6 +74,27 @@ def test_since_last_filters_older(db):
     ts = db.execute("SELECT timestamp FROM messages WHERE content = ?", (GOOD + ' again',)).fetchone()[0]
     assert [p['user_text'] for p in se.fetch_pairs(db, 30, after_ts=ts - 1)] == [GOOD + ' again']
     assert se.fetch_pairs(db, 30, after_ts=ts) == []
+
+
+def test_since_last_does_not_skip_a_turn_still_awaiting_its_reply(tmp_path):
+    now = time.time()
+    d = make_db()
+    d.execute("INSERT INTO sessions VALUES ('a','cli','A'), ('b','cli','B')")
+    add(d, 'a', 'user', GOOD, now - 100)               # no reply yet
+    add(d, 'b', 'user', GOOD + ' b', now - 50)
+    add(d, 'b', 'assistant', 'reply b', now - 49)
+    first = se.fetch_pairs(d, 30)
+    assert [p['session_id'] for p in first] == []      # b is held back too: its ts would advance the watermark past a
+    add(d, 'a', 'assistant', 'reply a', now - 40)
+    second = se.fetch_pairs(d, 30, after_ts=0.0)       # nothing was inserted, so the watermark is unchanged
+    assert [p['session_id'] for p in second] == ['a', 'b']
+
+
+def test_abandoned_unanswered_turn_does_not_block_forever():
+    d = make_db()
+    d.execute("INSERT INTO sessions VALUES ('a','cli','A')")
+    add(d, 'a', 'user', GOOD, time.time() - se.PENDING_GRACE_S - 10)
+    assert len(se.fetch_pairs(d, 30)) == 1             # old enough: final no_reply drop, not pending
 
 
 def _state_db(tmp_path):

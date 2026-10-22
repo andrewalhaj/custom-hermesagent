@@ -1,8 +1,8 @@
 #!/bin/bash
 # Hermes core update: snapshot, `hermes update`, re-apply core patches, migrate, env drop-ins,
 # venv deps, restart, verify; progress goes to Telegram because the update severs chat.
-# Launch detached: systemd-run --unit=hermes-update-$(date +%s) --collect /bin/bash ~/.hermes/scripts/ops/update-core
-# Before launch, put any core-file edits to keep as $PREP/*.patch (hermes-core-update-with-bypass §0b).
+# Launch detached: systemd-run --unit=hermes-update-$(date +%s) --collect --setenv=PORT_BRANCH=local/patches-<ts> --setenv=ROLLBACK_TAG=rollback/pre-update-<ts> /bin/bash ~/.hermes/scripts/ops/update-core
+# Local patches ride in PORT_BRANCH (ff-only merged; empty = vanilla upstream). Abort before restart: touch $HERMES_HOME/run/update-abort
 set -uo pipefail
 . "$(dirname "$0")/../lib/hermes_env.sh"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
@@ -21,6 +21,8 @@ TS="$(date +%Y%m%d-%H%M%S)"
 LOGFILE="$HERMES_HOME/logs/update-runner-${TS}.log"
 SNAP="pre-update-$(date +%Y-%m)"
 PREP="$HERMES_HOME/references/update-prep-$(date +%Y-%m-%d)"
+PORT_BRANCH="${PORT_BRANCH:-}"
+ROLLBACK_TAG="${ROLLBACK_TAG:-}"
 UNIT_DIR="$HOME/.config/systemd/user"
 mkdir -p "$HERMES_HOME/logs" "$PREP"
 
@@ -46,29 +48,36 @@ else
   exit 1
 fi
 
-# ---- 2b. Core-file patch re-apply (unprotected edits captured pre-update as $PREP/*.patch) ----
-notify "2b/10 🩹 re-applying core-file patches…"
+# ---- 2b. Port branch: ff-only merge, then hard-abort gate (a failure reverts and exits BEFORE any restart) ----
 cd "$REPO"
 CONFLICTS="$(git status --short | grep -E '^(UU|AA|DD)' | head -10)"
 [ -n "$CONFLICTS" ] && notify "2b/10 ⚠️ stash-pop left conflicts: ${CONFLICTS}"
-PR="2b/10 patches:"
-for p in "$PREP"/*.patch; do
-  [ -f "$p" ] || continue
-  n="$(basename "$p" .patch)"
-  f="$(grep -m1 '^+++ b/' "$p" | cut -c7-)"
-  if [ -n "$f" ] && git diff --quiet HEAD -- "$f" 2>/dev/null; then
-    if git apply --check "$p" >>"$LOGFILE" 2>&1 && git apply "$p" >>"$LOGFILE" 2>&1; then PR="${PR} ${n}=ok"
-    elif git apply --3way "$p" >>"$LOGFILE" 2>&1; then PR="${PR} ${n}=3way"
-    else PR="${PR} ${n}=FAILED"; fi
+revert() {  # $1 = why; old code is still running, so exiting here is safe
+  if [ -n "$ROLLBACK_TAG" ] && git rev-parse -q --verify "refs/tags/$ROLLBACK_TAG" >/dev/null; then
+    git reset --hard "$ROLLBACK_TAG" >>"$LOGFILE" 2>&1
   else
-    PR="${PR} ${n}=already-dirty(skipped)"
+    git checkout -- . >>"$LOGFILE" 2>&1
   fi
-done
-notify "$PR"
-# untracked modules the patches import must survive the update
-[ -f "$REPO/hermes_transient_errors.py" ] && log "hermes_transient_errors.py present" || notify "2b/10 ⚠️ hermes_transient_errors.py MISSING post-update"
-"$VENV_PY" -m py_compile gateway/run.py hermes_cli/main.py hermes_cli/kanban_db.py tools/kanban_tools.py agent/transports/chat_completions.py >>"$LOGFILE" 2>&1 \
-  && notify "2b/10 ✅ patched core files compile." || notify "2b/10 ❌ patched core file COMPILE FAILURE — check log before restart."
+  notify "2b/10 ❌ $1 — reverted to ${ROLLBACK_TAG:-HEAD}, gateway NOT restarted (old code still running)"
+  exit 1
+}
+if [ -z "$PORT_BRANCH" ]; then
+  notify "2b/10 no PORT_BRANCH set, skipping local patches"
+else
+  OLD_HEAD="$(git rev-parse HEAD)"
+  git merge --ff-only "$PORT_BRANCH" >>"$LOGFILE" 2>&1 || revert "ff-only merge of $PORT_BRANCH FAILED"
+  # Newest venv on disk, not the gateway's /proc maps: `hermes update` may have regenerated
+  # <gen> while the old pid still maps the previous one, and the restart will load the newest.
+  RPY="$(ls -td "$HERMES_HOME"/installs/*/environments/*/venv 2>/dev/null | head -1)/bin/python3"
+  RPY_NOTE=""
+  [ -x "$RPY" ] || { RPY="$VENV_PY"; RPY_NOTE=" (FALLBACK: runtime venv not found, used $VENV_PY)"; }
+  mapfile -t CHANGED < <(git diff --name-only --diff-filter=d "$OLD_HEAD" HEAD -- '*.py')
+  { [ "${#CHANGED[@]}" -eq 0 ] || "$RPY" -m py_compile "${CHANGED[@]}" >>"$LOGFILE" 2>&1; } \
+    || revert "py_compile of merged files FAILED on $RPY"
+  HERMES_DISABLE_LAZY_INSTALLS=1 "$RPY" -I -c 'import hermes_cli.main, gateway.run' >>"$LOGFILE" 2>&1 \
+    || revert "import smoke FAILED on $RPY"
+  notify "2b/10 ✅ merged $PORT_BRANCH ($(git rev-parse --short HEAD)); compile + import smoke OK on ${RPY}${RPY_NOTE}"
+fi
 
 # ---- 3. Config migrate ----
 notify "3/10 🔧 config migrate (default + satellites)…"
@@ -103,6 +112,7 @@ if [ -n "$MISSING" ]; then
 fi
 
 # ---- 7. Restart gateways ----
+[ -e "$HERMES_HOME/run/update-abort" ] && { notify "7/10 🛑 $HERMES_HOME/run/update-abort present — NOT restarting (old code still running)"; exit 1; }
 notify "7/10 🔄 restarting gateway…"
 systemctl --user restart hermes-gateway.service >>"$LOGFILE" 2>&1 \
   && notify "7/10 ✅ default gateway restarted." || notify "7/10 ⚠️ default restart failed via unit bus — Andrew: ssh $(hermes_env LH01_SSH "the host") && systemctl --user restart hermes-gateway.service"

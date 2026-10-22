@@ -140,9 +140,8 @@ def main():
 
     if unlabeled:
         try:
-            from knowledge.classifier import classify_batch
-            texts = [(f['text'] or '')[:400] for f in unlabeled]
-            paths = classify_batch(texts)
+            from knowledge.storage import _classify_sector  # Jev tree walk by default, centroid fallback
+            paths = [_classify_sector((f['text'] or '')[:1500]) for f in unlabeled]
 
             updates = [(f['id'], p) for f, p in zip(unlabeled, paths) if p]
             abstained = sum(1 for p in paths if not p)

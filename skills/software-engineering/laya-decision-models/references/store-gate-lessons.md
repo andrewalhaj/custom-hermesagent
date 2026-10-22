@@ -3,7 +3,7 @@
 Program log: ~/.hermes/references/laya-program.md. Data: ~/.hermes/cache/laya-exp/.
 
 1. Student tracks teacher. Test AUC plateaued (~0.77) across epochs 4/8, 2.2k/2.6k rows, 9 seeds, 8x more updates. Only label quality moved it: teacher balanced-acc 0.72 -> 0.82 moved AUC 0.77 -> 0.82. Before tuning training, measure the teacher on a live-verified set.
-2. Text-only labellers cap ~0.82-0.85 balAcc: live-only errors (DTG end-user cases, missing files, fixed bugs) are invisible from text. Best text-only recipe: verifier prompt verbatim, verdict-first (data/dev2/vf_prompt.md) + skeptical keep-audit (label_v3a.py r1), averaged as soft target {0,.5,1}; laya soft-CE accepts probability targets.
+2. Text-only labellers cap ~0.82-0.85 balAcc: live-only errors (work end-user cases, missing files, fixed bugs) are invisible from text. Best text-only recipe: verifier prompt verbatim, verdict-first (data/dev2/vf_prompt.md) + skeptical keep-audit (label_v3a.py r1), averaged as soft target {0,.5,1}; laya soft-CE accepts probability targets.
 3. Calib set MUST be in-distribution with the target. Out-of-distribution calib (older handlabel rows) ran ~7 pts lower precision at equal threshold -> calib-transfer recall 0.26-0.34; swapping in live-verified rows from the same pool -> 0.48-0.61 at P>=0.95.
 4. Dedup by normalized text can silently replace gold rows with soft copies — check src counts after build.
 5. Live-verifier IAA: 88% raw / kappa 0.57; disagreements all on keep-ish rows. Adjudicate before treating a test set as truth.

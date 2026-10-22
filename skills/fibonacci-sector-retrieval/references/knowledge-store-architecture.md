@@ -10,7 +10,7 @@
 | Layer | Technology | Location |
 |---|---|---|
 | Vector store | Supabase pgvector | `lmxjngzjpfcvakpqonxs` (us-east-2) |
-| Graph mirror | Neo4j Aura | `fce34ad7` at `c78e1cb1.databases.neo4j.io` |
+| Graph mirror (REMOVED 2026-10-15) | Neo4j Aura | `fce34ad7` at `c78e1cb1.databases.neo4j.io` |
 | Full-text | PostgreSQL tsvector | Same Supabase DB (`public.knowledge.tsv`) |
 | Retrieval engine | `scripts/knowledge/` package | `~/.hermes/scripts/knowledge/` |
 | Classification | `_detect_query_sector()` | Keyword-based, QUERY-tuned, 200-char guard |
@@ -39,8 +39,8 @@
 2. pgvector cosine search (pool_size=100 or sector-filtered subset)
 3. PostgreSQL FTS (websearch_to_tsquery) — parallel
 4. RRF merge (k=20): weighted reciprocal rank fusion of vector + text results
-5. IF SECTOR_BOOST=true: Fibonacci same-sector multiplier (×3.70)
-6. IF GRAPH_TRAVERSE=true: Neo4j confirmatory boost
+5. (removed 2026-10-19) SECTOR_BOOST Fibonacci multiplier — no-op under RERANK
+6. (removed 2026-10-15/16) GRAPH_TRAVERSE / Neo4j mirror — gone
 7. Confidence scoring + metadata enrichment
 8. Return top K results
 ```
@@ -49,11 +49,11 @@
 
 | Flag | Effect | Benchmark | Status |
 |---|---|---|---|
-| `SECTOR_BOOST` | Same-sector ×3.70 multiplier | 100% P@5 | **ON** |
-| `GRAPH_TRAVERSE` | Neo4j confirmatory boost | +stability | **ON** |
+| `SECTOR_BOOST` | Same-sector ×3.70 multiplier | 100% P@5 (pre-RERANK) | **REMOVED 2026-10-19** |
+| `GRAPH_TRAVERSE` | Neo4j confirmatory boost | +stability | **REMOVED 2026-10-16** |
 | `SECTOR_FILTER` | Exclude non-matching sectors BEFORE search | 87% P@5 | **OFF** |
 | `LAYERED_RETRIEVAL` | Filter then expand | 80% P@5 | **OFF** |
-| `GRAPH_EXPAND` | Neo4j graph expansion | Pushes correct to rank 11+ | **OFF** |
+| `GRAPH_EXPAND` | Neo4j graph expansion | Pushes correct to rank 11+ | **REMOVED (Neo4j gone)** |
 | `RERANK` | Cross-encoder rerank | Untested | **OFF** |
 
 ## Fibonacci Sector System

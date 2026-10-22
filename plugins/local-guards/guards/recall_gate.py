@@ -7,21 +7,21 @@ Opt-in: off unless HERMES_RECALL_GATE is set (and not an off-word). HERMES_RECAL
 from __future__ import annotations
 
 import os
-import re
 import sys
+from pathlib import Path
 
 from ._common import enabled, is_worker, user_text
 
-try:  # single source lives in scripts/knowledge; the copy below is the fallback when scripts/ is not on sys.path
+_SCRIPTS_DIR = str(Path(__file__).resolve().parents[3] / "scripts")  # repo root/scripts, as plugins/supabase does
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+try:
     from knowledge.recall_shape import is_recall as _is_recall
-except ImportError:
-    _RECALL = re.compile(  # keep in sync with scripts/knowledge/recall_shape.py (narrow subset)
-        r"what\s+changed|what\s+did\s+we\s+(?:change|decide|do)\b|where\s+were\s+we|remind\s+me(?!\s+to\b)"
-        r"|catch\s+me\s+up|\brecap\b|\blast\s+(?:night|time|session)\b", re.IGNORECASE)
-    _OVERRIDE = re.compile(r"NO SESSION SEARCHES|no lookup", re.IGNORECASE)  # Andrew's explicit skip
+except Exception as e:  # fail open: gate disabled, never a gateway crash
+    print(f"[recall_gate] recall_shape import failed, gate disabled: {e}", file=sys.stderr)
 
     def _is_recall(text):
-        return bool(_RECALL.search(text)) and not _OVERRIDE.search(text)
+        return False
 _REMINDER = ("[recall-gate] This is a recall question. Before answering, run BOTH memory_search AND "
              "session_search (chat_history_lookup); answer from the union. The reply will be withheld until "
              "both have run this turn. Use short keyword queries (2-4 words) for session_search; FTS5 ANDs every term.")

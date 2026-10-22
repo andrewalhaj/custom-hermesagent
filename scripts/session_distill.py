@@ -270,18 +270,21 @@ def distill_session(session, messages):
     if not (decisions or outcomes or skipped or user_directives) and len(opener) <= 10:
         return None
 
+    decisions, outcomes, skipped, user_directives = _select_items(
+        title, opener, decisions, outcomes, skipped, user_directives)
+
     # ── Build digest ──
     parts = []
     parts.append(f"Session: {title} | {date_str}")
 
     if decisions:
-        parts.append(f"Decisions: {', '.join(sorted(decisions)[:8])}")
+        parts.append(f"Decisions: {', '.join(decisions[:8])}")
     if outcomes:
-        parts.append(f"Outcomes: {', '.join(sorted(outcomes)[:6])}")
+        parts.append(f"Outcomes: {', '.join(outcomes[:6])}")
     if skipped:
-        parts.append(f"Skipped: {', '.join(sorted(skipped)[:4])}")
+        parts.append(f"Skipped: {', '.join(skipped[:4])}")
     if user_directives:
-        parts.append(f"Directives: {', '.join(sorted(user_directives)[:4])}")
+        parts.append(f"Directives: {', '.join(user_directives[:4])}")
 
     # Context summary
     context = f"Context: Session started with user asking to {opener[:120]}"
@@ -296,8 +299,39 @@ def distill_session(session, messages):
     return digest
 
 
+def _select_items(title, opener, decisions, outcomes, skipped, directives):
+    """Order each section's items for the caps. DISTILL_JUDGE=true: one Jev request scores every item
+    (is it a concrete decision/outcome/instruction, not narration/status word/fragment), drops items under
+    DISTILL_JUDGE_THRESHOLD and ranks the rest by score. Otherwise, or on any failure: alphabetical (previous behaviour)."""
+    sections = [sorted(decisions), sorted(outcomes), sorted(skipped), sorted(directives)]
+    if os.environ.get("DISTILL_JUDGE") != "true":
+        return sections
+    try:
+        from knowledge import jev
+        thr = jev.DISTILL_THRESHOLD  # question + threshold live in knowledge/jev.py
+        questions, index = {}, {}
+        for si, items in enumerate(sections):
+            for ii, item in enumerate(items):
+                if jev.withheld(item):
+                    continue  # never sent; keeps a neutral score
+                qid = f"s{si}_{ii}"
+                index[qid] = (si, ii)
+                questions[qid] = jev.distill_question(item)
+        if not questions:
+            return sections
+        answers = jev.ask({"session_title": title}, questions, timeout=60)
+        scores = [[0.5] * len(items) for items in sections]
+        for qid, (si, ii) in index.items():
+            scores[si][ii] = float(answers[qid]["noul"])
+        return [[item for _, item in sorted(((s, it) for s, it in zip(sc, items) if s >= thr), key=lambda x: -x[0])]
+                for sc, items in zip(scores, sections)]
+    except Exception as e:
+        print(f"[session_distill] judge failed, alphabetical fallback: {e}", file=sys.stderr)
+        return sections
+
+
 def _supersede_previous(digest, tags_list, new_id):
-    """Best-effort: delete this session's earlier digests (tagged, or untagged 'Live:' rows by exact title)."""
+    """Best-effort: delete this session's earlier digests (matched by session tag only)."""
     sid = next((t[8:] for t in tags_list if t.startswith("session:")), None)
     if not sid or not new_id:
         return
@@ -305,10 +339,8 @@ def _supersede_previous(digest, tags_list, new_id):
         from urllib.parse import quote
         from knowledge import _supa_select, get_supabase
         from knowledge_maintenance import delete_fact
-        title = digest.split("\n", 1)[0].rsplit(" | ", 1)[0][len("Session: "):]
-        # shortcut: old Live rows carry no tag, so same-titled sessions share them; moot once they age out
-        live = f"Session: Live: {title.removeprefix('Live: ')} | unknown-date"
-        rows = _supa_select("select=id&or=" + quote(f'(tags.cs.["session:{sid}"],text.like.{live}*)'))
+        # old untagged 'Live:' rows are no longer matched (titles are user text, unsafe in a PostgREST filter); they age out
+        rows = _supa_select("select=id&or=" + quote(f'(tags.cs.["session:{sid}"])'))
         for r in rows:
             if r["id"] != new_id:
                 delete_fact(*get_supabase(), r["id"], reason=f"superseded-by:{new_id}")

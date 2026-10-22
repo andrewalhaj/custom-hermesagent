@@ -22,7 +22,7 @@ Ragas end-to-end faithfulness is a *baseline to watch*, not a gate.
    index build must be excluded or they score as misses; count what is actually there.
 3. Generate 2–3× the target, then QA-filter (`build_set.py`): drop questions answerable from the
    first 500 chars when a deep query was intended, drop near-duplicates, run the secret guard on
-   both question and answer (DTG reports are in the corpus) — **sanitize answers only, never queries**.
+   both question and answer (work reports are in the corpus) — **sanitize answers only, never queries**.
 4. Freeze `benchmark_references.json` + `qrels_references.json` and commit them in `knowledge_db/`
    **before** any arm runs. Record predictions in the experiment PLAN first.
 5. Arms: off / on at the shipped cap / on with the cap lifted. The shipped-cap arm is the number that

@@ -39,7 +39,7 @@ and retail (Amazon) listing verification.
   a terminal + VM + dev box unless he says otherwise.
 - **Shape: numbers → one pick → skip list → one question.** Bulleted price/spec lines, a
   bold single recommendation with its price, what to skip and why, then at most ONE
-  clarifying question that would change the answer (personal vs DTG purchase, etc.). No tables
+  clarifying question that would change the answer (personal vs work purchase, etc.). No tables
   (Telegram).
 - **Memory is the non-upgradeable axis on Apple/laptops** — prefer more RAM over faster
   silicon at equal price when the workload is VMs + containers.

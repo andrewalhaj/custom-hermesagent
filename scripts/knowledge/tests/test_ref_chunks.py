@@ -517,11 +517,13 @@ def test_search_returns_body_field(tmp_path, monkeypatch):
         assert len(r["body"]) > 250, (
             f"'body' should be the full chunk (> 250 chars), got {len(r['body'])}"
         )
-        # content = best-window snippet ≤ 250 chars
-        assert len(r["content"]) <= 250, (
-            f"'content' should be the 250-char window, got {len(r['content'])}"
+        # content = the chunk body plus its neighbours (REF_CHUNK_WINDOW, RG2 2026-10-21); never shorter than the body
+        assert len(r["content"]) >= len(r["body"]), (
+            f"'content' should contain the whole chunk (+ window), got {len(r['content'])} < {len(r['body'])}"
         )
         assert isinstance(r["rrf"], float), "rrf must be a float"
+    monkeypatch.setenv("REF_CHUNK_WINDOW", "0")
+    assert all(r["content"] == r["body"] for r in rc_mod.search("longword", top_k=5)), "window=0 must return the bare chunk"
 
 
 def test_no_zero_vectors_after_failing_embed(tmp_path, monkeypatch):

@@ -57,7 +57,7 @@ Tunable: `HERMES_OFFLOAD_THRESHOLD` (default 85).
 When the user says the agent "forgot" or feels a disconnect between channels, separate three layers before diagnosing — they fail independently and only one is a bug:
 
 1. **Facts** — one MEMORY.md/USER.md, one Supabase store, read by every entry point under the same profile. Shared by design. Check: `memory_search` for a fact the other channel wrote.
-2. **Thread** — transcripts are session-local (one `state.db`, `source` column = cli/telegram/tui/subagent). RAG prefetch searches the knowledge store only, never session transcripts, so no channel ever auto-inherits another's conversation. This is architecture, not a malfunction: say so, don't hunt a bug. When the user's opening implies continuity ("where were we", "do you recall", "the thing from earlier"), run `chat_history_lookup` over the last ~24h FIRST, then answer.
+2. **Thread** — transcripts are session-local (one `state.db`, `source` column = cli/telegram/tui/subagent). RAG prefetch searches the knowledge store only, never session transcripts, so no channel ever auto-inherits another's conversation. This is architecture, not a malfunction: say so, don't hunt a bug. When the user's opening implies continuity ("where were we", "do you recall", "the thing from earlier"), run `session_search` over the last ~24h FIRST, then answer.
 3. **Prefetch** — the only automatic recall. It can be silently degraded: on an embed timeout the memory manager skips recall for the rest of that session, so the agent runs on hot memory alone and *looks* forgetful. Before calling RAG "healthy", grep `prefetch timed out` / `remote embed failed` in `logs/agent.log` for the window in question and name the sessions it hit; component probes (embed/rerank/store each green) do not prove the chain.
 
 Memory writes are loud, not silent: an embed failure errors the `memory_add` call. A gap in recall is almost always layer 2 or 3, not lost writes.
@@ -125,12 +125,15 @@ Adds destroy nothing, so they are safe to do silently. This is the freedom — u
 The persona already blocks the worst offenders, but reinforce these:
 
 - **Stale-by-design facts**: PR numbers, issue numbers, commit SHAs, "fixed bug X," "submitted PR Y," file counts, "Phase N done" — anything that will be stale in a week
+- **Status snapshots of work that has a system of record** ("audit items #8–#18 still open", "restore pending"): the repo, the kanban board or the service already knows the state and keeps changing it outside the note. Store the POINTER plus the derivation command instead (`reports at <path>; status = git log --since=<audit-date>` / `kanban list`). A snapshot is false the moment anyone works and nobody rewrites it; the reader then repeats it as current and the user becomes the staleness detector.
 - **Procedural outcomes**: session results, task completions, what was built, what was deployed
 - **Rediscoverable facts**: things a tool call or skill can find in under 5 seconds
 - **Redundant information**: anything already in a skill that loads automatically
 - **Raw credentials**: API keys, tokens, admin passwords (they're in .env or auth.json)
 
-Use `chat_history_lookup` to recall past outcomes. Use skills for procedures. Use memory for durable facts.
+**Closures.** When a session finishes work that an existing note lists as open, rewrite that note in the same session (pointer form, never a new status snapshot). The fix was done by you or dispatched by you — nobody else will write it down, and the supersede guard is write-time kNN dedup: it can only displace a stale row when a near-duplicate newer row lands, never on its own.
+
+Use `session_search` to recall past outcomes. Use skills for procedures. Use memory for durable facts.
 
 ## Pre-Compaction Checkpoint Protocol (mandatory)
 
@@ -329,6 +332,9 @@ Memory entries and skill bodies rot silently. A fact stored as true in June ("we
 
 ### Discovery triggers
 Run a stale-data sweep when:
+- A memory entry carries a date-stamped status ("Status <date>: … still open/pending"). Treat it as a past claim, not current state: `git log --since=<date>` on the repo, `ls -lt` on the paths, `systemctl show` on the service BEFORE repeating it in a "what's left" answer — or say "as of <date>, unverified". Relevance scoring cannot catch this: the note IS the most relevant hit for "what's open"; only a live check or a newer fact can.
+- You are about to describe a retrieval/pipeline mechanism (a flag, a guard, a decay term) as "live" or "not firing": `grep -rn FLAG scripts/ plugins/` for the code path and `tr '\0' '\n' < /proc/<MainPID>/environ | grep FLAG` for the running process first. Memory notes about pipeline features outlive the commits that remove them.
+- A memory entry tells you to run a named script or tool (`run scripts/X.py`, `use chat_history_lookup`): `ls` the path / `tool_search` the name before following it. Script cuts and tool renames never rewrite the notes that cite them, so the note outlives the thing by weeks; when it is gone, replace the note with the tool-only recipe in the same turn.
 - A memory entry references a hostname, port, path, or service status
 - A skill body describes a backend/architecture that may have changed
 - A knowledge store entry makes a negative claim ("X is broken", "Y is expired", "Z is not installed")

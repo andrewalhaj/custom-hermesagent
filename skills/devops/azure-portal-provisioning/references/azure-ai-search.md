@@ -1,6 +1,6 @@
 # Azure AI Search (aka Foundry IQ): sizing, setup, permissions
 
-Use when designing or provisioning an AI Search service for RAG (file-share knowledge hub, Mira's Ask Mira index, a Claude Code search tool). Full design doc: `~/reports/azure-ai-search-dtg-guide.md`. Re-check prices/limits on the live pages before quoting — they move.
+Use when designing or provisioning an AI Search service for RAG (file-share knowledge hub, an in-house app's own index, a Claude Code search tool). Full design doc: `~/reports/azure-ai-search-<employer>-guide.md`. Re-check prices/limits on the live pages before quoting — they move.
 
 ## Naming
 Microsoft markets it as **Foundry IQ (Azure AI Search)**; the pricing page title says "Foundry IQ". Same service and portal blade. "Foundry IQ knowledge bases" are the optional agentic layer on top.
@@ -33,7 +33,7 @@ Microsoft markets it as **Foundry IQ (Azure AI Search)**; the pricing page title
 - Heading-aware chunks (Document Layout skill) match our measured winner; Text Split (~2,000 chars, ~10% overlap) is the cheap fallback.
 - OCR on for shares with scans, else scans index as empty.
 - Soft-delete detection so server deletions disappear from search.
-- App-owned content (Mira) uses the **push API** from its publish queue, not an indexer.
+- App-owned content (the in-house app) uses the **push API** from its publish queue, not an indexer.
 - Use an **index alias** so schema rebuilds swap behind a stable name.
 
 ## Query pattern for cite-or-refuse RAG

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import hermes_env
 
 BATCH = 32
+PENDING_GRACE_S = 3600
 _CHATTER = re.compile(r'^(ok|okay|yes|no|proceed|go|test|thanks|k)\b.{0,20}$', re.I | re.S)
 _INTERNAL = ('PONYTAIL MODE', '[recall-gate]', 'memory-context')
 _SECRET = re.compile(r'\b(?:gh[pousr]_|github_pat_|sbp_|sk-[A-Za-z0-9]|xox[abp]-|AKIA[0-9A-Z]{12}|eyJ[A-Za-z0-9_-]{20,})')  # token prefixes (gitleaks-style)
@@ -55,16 +56,19 @@ def fetch_pairs(db, days, after_ts=0.0):
         "SELECT m.id, m.session_id, s.source, s.title, m.role, m.content, m.timestamp "
         "FROM messages m JOIN sessions s ON s.id = m.session_id "
         "WHERE s.source IN ('telegram','cli') AND m.role IN ('user','assistant') ORDER BY m.session_id, m.id").fetchall()
-    pairs, cur = [], None
+    pairs, cur, last = [], None, {}
     for mid, sid, src, title, role, content, ts in rows:
         if role == 'user':
-            cur = {'message_id': mid, 'session_id': sid, 'source': src, 'title': title,
+            cur = last[sid] = {'message_id': mid, 'session_id': sid, 'source': src, 'title': title,
                    'user_text': (content or '').strip(), 'reply_text': '', 'ts': ts}
             if ts > since:
                 pairs.append(cur)
         elif cur and cur['session_id'] == sid and not cur['reply_text'] and (content or '').strip():
             cur['reply_text'] = content.strip()
-    return pairs
+    # An unanswered newest turn may still get a reply; hold the watermark below it so --since-last (max(ts)) can't skip it.
+    # shortcut: 1h grace, after that it is a final no_reply drop
+    pending = [c['ts'] for c in last.values() if not c['reply_text'] and c['ts'] > time.time() - PENDING_GRACE_S]
+    return [p for p in pairs if not pending or p['ts'] < min(pending)]
 
 
 def _iso(ts):

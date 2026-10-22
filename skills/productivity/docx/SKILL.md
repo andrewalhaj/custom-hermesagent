@@ -38,6 +38,9 @@ fields, and package health checks. It does not render documents itself
 
 - Python 3.10+ with `python-docx` installed:
   `pip install python-docx` (import name is `docx`; lxml comes with it).
+  On this host the gateway venv already has it — run the scripts with
+  `/usr/local/lib/hermes-agent/venv/bin/python3`; bare `python3` fails
+  on `import docx` and the create step dies before writing anything.
 - Comments `add` uses the native API on python-docx >= 1.2 and an XML
   fallback on older versions — both are automatic.
 - For image blocks: the image files must exist locally (PNG/JPEG).
@@ -138,9 +141,28 @@ soffice --headless --convert-to pdf --outdir outdir/ file.docx
 ```
 
 Check availability first (`command -v soffice || command -v
-libreoffice`). If neither exists, tell the user PDF conversion is
-unavailable in this environment rather than improvising — python-docx
-cannot render PDFs, and layout fidelity requires a real renderer.
+libreoffice`). If neither exists, the working fallback is
+pandoc → HTML → wkhtmltopdf (both present here); python-docx itself
+cannot render:
+
+```bash
+pandoc file.docx -t html5 -s --metadata title=" " -o /tmp/f.html
+# inject CSS before </head>: body font/size, table{border-collapse;width:100%},
+# th,td{border:1px solid #777;padding:6px}, h1.pb{page-break-before:always},
+# and a .sheet td{height:50px} + nth-child widths for any fill-in table
+wkhtmltopdf -q --page-size Letter -T 15mm -B 15mm -L 12mm -R 12mm /tmp/f.html out.pdf
+```
+
+- Mark page breaks by adding `class="pb"` to the `<h1 id=…>` that starts
+  each page (pandoc drops Word's page-break elements) and find the
+  fill-in table by its first header cell, not by table order.
+- The packaged wkhtmltopdf is unpatched-qt: `--footer-*`/`--header-*`
+  switches are ignored, so page numbers must come from CSS or be skipped.
+- Tall table rows push content onto an extra page; check `pdfinfo`
+  Pages and `pdftotext -f N` of the last page, then trim an empty
+  trailing page with `qpdf in.pdf --pages . 1-N -- out.pdf`.
+- Verify visually at low res: `pdftoppm -r 40 -f 2 -l 2 -png out.pdf p`
+  then `vision_analyze` the page with the table.
 
 ## Pitfalls
 

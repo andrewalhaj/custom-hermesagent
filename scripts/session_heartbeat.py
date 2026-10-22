@@ -65,8 +65,8 @@ def audit(msg: str) -> None:
 # ── Store gate (shadow: scores and logs, never changes what is stored) ──
 
 def gate_scores(facts: list[tuple[str, str]]) -> list[float] | None:
-    """p_drop per fact when STORE_GATE=log; None when off or on any gate failure."""
-    if os.environ.get("STORE_GATE") != "log" or not facts:
+    """p_drop per fact when STORE_GATE is log|on; None when off or on any gate failure (fail open: store)."""
+    if os.environ.get("STORE_GATE") not in ("log", "on") or not facts:
         return None
     try:
         from knowledge import store_gate
@@ -79,11 +79,11 @@ def gate_scores(facts: list[tuple[str, str]]) -> list[float] | None:
 def gate_log(session_id: str, message_id: int, tag: str, fact: str, p_drop: float,
              stored: bool, guard_rejected: bool) -> None:
     try:
-        from knowledge.store_gate import THRESHOLD
+        from knowledge.store_gate import THRESHOLD, BACKEND
         row = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "session_id": session_id, "message_id": message_id, "tag": tag, "fact": fact,
-            "p_drop": p_drop, "verdict": "drop" if p_drop >= THRESHOLD else "keep",
+            "backend": BACKEND, "p_drop": p_drop, "verdict": "drop" if p_drop >= THRESHOLD else "keep",
             "stored": stored, "guard_rejected": guard_rejected,
         }
         os.makedirs(os.path.dirname(SHADOW_LOG), exist_ok=True)
@@ -155,7 +155,15 @@ def process_session(
             break
         # Scored up front (one forward pass); only facts that reach store() are logged.
         scores = gate_scores(facts)
+        enforce = os.environ.get("STORE_GATE") == "on" and scores is not None
+        if enforce:
+            from knowledge.store_gate import THRESHOLD
         for i, (fact, tag) in enumerate(facts):
+            if enforce and scores[i] >= THRESHOLD:
+                # dropped before the dedup search; the log row holds the full fact for replay (scripts/jev_restore.py)
+                gate_log(session_id, m["id"], tag, fact, scores[i], False, False)
+                skipped += 1
+                continue
             if is_duplicate(fact):
                 skipped += 1
                 continue

@@ -24,7 +24,7 @@ PROVEN 2026-10-13 from a Windows work laptop.
 ## Onboarding a new device (one-time)
 
 1. Have him generate a key on the device and paste the **public** half.
-   - Windows **cmd.exe** (Ninja/RMM sessions and the DTG laptop default):
+   - Windows **cmd.exe** (Ninja/RMM sessions and the work laptop default):
      ```
      ssh-keygen -t ed25519
      type %USERPROFILE%\.ssh\id_ed25519.pub

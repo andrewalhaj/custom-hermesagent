@@ -53,5 +53,7 @@ scripts/tests/test_refactor_runner.py
 # generated skill sync state / lock (local only)
 skills/.bundled_manifest
 skills/.usage.json.lock
-# DTG rollout state (internal domain + addresses) — stays off the public repo by decision 2026-10-20
+# employer rollout state (internal domain + addresses) — stays off the public repo by decision 2026-10-20
 skills/devops/siemens-alm-licensing/references/
+# personal (resume facts) — never published
+skills/productivity/job-application-writing/

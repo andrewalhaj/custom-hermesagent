@@ -1,0 +1,61 @@
+{
+  "page": {"size": "Letter", "margins_mm": {"top": 20, "bottom": 20, "left": 22, "right": 22}},
+  "header": "Documentation Search — Question Collection",
+  "footer_page_numbers": true,
+  "styles": [{"name": "Note", "font": "Calibri", "size": 10, "italic": true, "color": "555555"}],
+  "blocks": [
+    {"type": "heading", "level": 1, "text": "Help us test the new documentation search"},
+    {"type": "paragraph", "text": "We are setting up a search tool that lets you ask a question in plain words and get the right procedure, spec or document back. Before we trust it, we need to test it against real questions — the ones you actually ask. That is where you come in."},
+    {"type": "paragraph", "text": "This takes about 15 minutes. You do not need to know anything about the tool. Just write down the questions you ask (or get asked), the way you would actually say them."},
+    {"type": "heading", "level": 2, "text": "What we need from you"},
+    {"type": "numbered_list", "items": [
+      "5 to 10 real questions you have asked, or been asked, in the last few months.",
+      "For each one: where the answer lives (which document, binder, drawing or page), if you know. If you do not know, leave it blank — that is useful information too.",
+      "The answer itself, in one or two lines, if you know it."
+    ]},
+    {"type": "heading", "level": 2, "text": "Rules of thumb"},
+    {"type": "bullet_list", "items": [
+      "Write the question the way you would say it. Spelling does not matter.",
+      "Part numbers, fault codes and model numbers are great questions on their own.",
+      "Include questions you were NOT able to find an answer for. We need to know what the tool should say \"I don't have that\" to.",
+      "Include the odd one that needs two documents to answer.",
+      "Do not look anything up to make the question better. First version is the right version.",
+      "No customer-confidential content in the question text. Reference the document by name; do not paste its contents."
+    ]},
+    {"type": "heading", "level": 2, "text": "Aim for a mix"},
+    {"type": "table", "style": "Table Grid", "header": ["Kind of question", "Example", "Rough share"], "rows": [
+      ["How do I… (a procedure)", "<example procedure question>", "about 4 in 10"],
+      ["Look up a value / part / code", "<example lookup>", "about 3 in 10"],
+      ["Needs two documents", "<example multi-doc question>", "about 2 in 10"],
+      ["We don't have this written down", "<example undocumented topic>", "about 1 in 10"]
+    ]},
+    {"type": "page_break"},
+    {"type": "heading", "level": 1, "text": "Question sheet"},
+    {"type": "paragraph", "text": "Your name: ____________________    Role / area: ____________________    Date: ____________"},
+    {"type": "paragraph", "style": "Note", "text": "Fill what you can. \"Don't know\" in the answer-location column is a valid and useful entry."},
+    {"type": "table", "style": "Table Grid",
+     "header": ["#", "Question — exactly as you would ask it", "Where the answer lives (document / drawing / binder / page) — or \"don't know\"", "The answer, in a line or two (if you know it)", "How often does this come up? (daily / weekly / rare)"],
+     "rows": [["1","","","",""],["2","","","",""],["3","","","",""],["4","","","",""],["5","","","",""],["6","","","",""],["7","","","",""],["8","","","",""],["9","","","",""],["10","","","",""]]},
+    {"type": "paragraph", "runs": [{"text": "Return to: ", "bold": true}, {"text": "<owner name / channel>"}]},
+    {"type": "page_break"},
+    {"type": "heading", "level": 1, "text": "For the reviewer (documentation owner)"},
+    {"type": "paragraph", "style": "Note", "text": "This page is for whoever consolidates the sheets. Askers can ignore it."},
+    {"type": "heading", "level": 2, "text": "Consolidating"},
+    {"type": "numbered_list", "items": [
+      "Enter every question verbatim into the master sheet (one row per question). Keep the original wording; add a cleaned version in a separate column if needed.",
+      "De-duplicate only exact repeats. Two people asking the same thing differently is two useful rows.",
+      "Tag each row with a kind: procedure / lookup / multi-doc / not-documented.",
+      "For every row with a known answer location, a subject-matter owner confirms the document and section. Record document name, section heading or page, and the answer text.",
+      "Rows marked \"don't know\" go to the owner for a 5-minute lookup. If genuinely undocumented, tag not-documented.",
+      "Target 100 rows. 50 is a usable start. Freeze the file once reached (version it; add to a v2 rather than editing v1)."
+    ]},
+    {"type": "heading", "level": 2, "text": "Master sheet columns"},
+    {"type": "table", "style": "Table Grid", "header": ["Column", "Content"], "rows": [
+      ["id", "Running number"], ["question", "Verbatim from the asker"], ["kind", "procedure / lookup / multi-doc / not-documented"],
+      ["gold_document", "File name or page title that answers it (blank for not-documented)"], ["gold_section", "Heading, step range or page number"],
+      ["gold_answer", "The answer text, 1–3 lines"], ["frequency", "daily / weekly / rare"], ["source", "Who asked (role is enough)"], ["confirmed_by", "Owner who verified the gold answer"]
+    ]},
+    {"type": "heading", "level": 2, "text": "How the set is used"},
+    {"type": "paragraph", "text": "Every candidate configuration of the search tool is run against the full set and scored the same way: did the right document appear in the top 5 results, how high did it rank, did the returned text actually contain the answer, and did the not-documented questions correctly come back empty. A change ships only when it beats the current setup on these numbers with a margin larger than noise. The set is never edited to make a result look better."}
+  ]
+}

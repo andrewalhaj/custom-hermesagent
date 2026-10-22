@@ -35,6 +35,7 @@ import logging
 import threading
 from collections import defaultdict
 from pathlib import Path
+from knowledge.config import env as _cfg_env  # .env fallback: cron runs without the environment loaded
 
 # ── Config constants (one-line change: edit the default literal below) ────────
 REF_CHUNK_TARGET: int = int(os.environ.get("REF_CHUNK_TARGET", "800"))
@@ -44,19 +45,10 @@ HERMES_HOME: Path = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 INDEX_DIR: Path = HERMES_HOME / "cache" / "ref_chunks"
 
 # ── Reports corpus extension ──────────────────────────────────────────────────
-# Second index root: ~/reports/*.md, gated by explicit allowlist.
-# Files not in this tuple are never indexed, regardless of what exists on disk.
+# Second index root: ~/reports/*.md, gated by explicit allowlist (REPORTS_ALLOWLIST: comma-separated
+# filenames, set in .env — the names themselves are deployment-specific). Empty = no reports indexed.
 REPORTS_DIR: Path = Path(os.environ.get("REPORTS_DIR", Path.home() / "reports"))
-REPORTS_ALLOWLIST: tuple = (
-    "dtg-siemens-license-server-plan.md",
-    "dtg-azure-landing-zone.md",
-    "hermes-agent-repo-plan.md",
-    "mira-build-plan.md",
-    "dtg-ppkg-onboarding-runbook.md",
-    "connected-machine-shop-project.md",
-    "rea-profile-plan.md",
-    "azure-ai-search-dtg-guide.md",
-)
+REPORTS_ALLOWLIST: tuple = tuple(f.strip() for f in _cfg_env("REPORTS_ALLOWLIST").split(",") if f.strip())
 # Label prefix applied to chunk 'file' keys so the two roots stay distinguishable.
 _REPORTS_PREFIX: str = "reports/"
 
@@ -311,7 +303,7 @@ def _build_impl(embed_fn, chunk_overlap_fn, synthetic_prefix_fn, np, incremental
         try:
             sha   = _sha256_file(rep_file)
             mtime = rep_file.stat().st_mtime
-            key   = _REPORTS_PREFIX + rep_file.name   # e.g. "reports/dtg-azure-landing-zone.md"
+            key   = _REPORTS_PREFIX + rep_file.name   # e.g. "reports/<name>.md"
             current_shas[key] = {"sha256": sha, "mtime": mtime}
         except Exception as e:
             logger.warning("Could not stat/hash %s: %s", rep_file, e)
@@ -385,7 +377,7 @@ def _build_impl(embed_fn, chunk_overlap_fn, synthetic_prefix_fn, np, incremental
                 pfx = synthetic_prefix_fn(str(rep_file), heading_ctx)
                 embed_text = pfx + "\n\n" + body
                 new_chunks.append({
-                    "file":            key,          # "reports/dtg-azure-landing-zone.md"
+                    "file":            key,          # "reports/<name>.md"
                     "source_path":     str(rep_file),
                     "chunk_idx":       idx,
                     "heading_context": heading_ctx,
@@ -670,6 +662,17 @@ def search(query: str, top_k: int = 5, per_file_cap=None):
         return []
 
 
+def _window_text(chunks, chunk, body):
+    """Chunk body with REF_CHUNK_WINDOW neighbours either side (same file, adjacent chunk_idx), in document order."""
+    w = int(os.environ.get("REF_CHUNK_WINDOW", "1") or 0)
+    if w <= 0:
+        return body
+    f, i = chunk.get("file"), chunk.get("chunk_idx", 0)
+    near = {c["chunk_idx"]: c.get("body", "") for c in chunks if c.get("file") == f and abs(c.get("chunk_idx", -99) - i) <= w}
+    near[i] = body
+    return "\n".join(near[k] for k in sorted(near))
+
+
 def _search_impl(query: str, top_k: int, per_file_cap):
     import numpy as np
 
@@ -734,8 +737,9 @@ def _search_impl(query: str, top_k: int, per_file_cap):
         else:
             stem = Path(src_path).stem if src_path else fname_key.replace(".md", "")
 
-        # content = best 250-char query-term-overlap window of the chunk body
-        content = best_window(body, query, window_size=250)
+        # content = the chunk plus its neighbours in the same file (RG2 arm C: deep containment 0.72 -> 0.80).
+        # REF_CHUNK_WINDOW=0 returns the chunk alone; the 250-char best_window excerpt was the pre-RG2 behaviour.
+        content = _window_text(chunks, chunk, body)
 
         results.append({
             "store":       "reference",

@@ -142,3 +142,13 @@ def test_state_is_capped(rg):
     for i in range(rg._MAX_SESSIONS + 20):
         llm(rg, session=f"s{i}", turn_id=f"t{i}")
     assert len(rg._sessions) <= rg._MAX_SESSIONS
+
+
+def test_import_failure_fails_open(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "knowledge.recall_shape", None)  # makes the import raise ImportError
+    for name in [n for n in sys.modules if n.startswith("lg_under_test.guards")]:
+        del sys.modules[name]
+    _load_plugin()
+    from lg_under_test.guards import recall_gate as mod
+    assert mod._is_recall(RECALL) is False
+    assert "gate disabled" in capsys.readouterr().err

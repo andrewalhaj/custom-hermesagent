@@ -60,15 +60,70 @@ crash loop in `hermes_cli/main.py` until the next `git reset`.
    tag for every reflog-only commit you depend on — reflog entries expire; tags don't.
 3. **Live tree stays untouched until a reviewed merged branch exists.** Port in
    worktrees; the user reviews the merged diff before any checkout of the live tree.
-4. **Tree switch + gateway restart happen from an outside shell.** The gate blocks
-   even `bash -n` on a script that mentions a gateway restart; hand the user the
-   launch command (`systemd-run --unit=hermes-retry-$(date +%s) --collect /bin/bash <runner>`).
-   **Before handing over (or re-handing) that command, `ls -t` the runner log dir and
+4. **Tree switch + gateway restart happen from an outside shell or a pre-defined
+   oneshot user unit.** The gate blocks even `bash -n` on a script that mentions a
+   gateway restart; from inside a chat, start the runner with
+   `systemctl --user start --no-block hermes-core-update.service` (edit its
+   `Environment=` lines first, `daemon-reload`) — an inline
+   `systemd-run … <runner>` is rejected because the command text names the script.
+   **Before handing over (or re-handing) a launch command, `ls -t` the runner log dir and
    tail the newest log** — the user often launches the moment the branch is ready,
    so a "here is the relaunch command" reply after the run already completed reads
    as not having checked. Report the run's result instead.
 
-## Procedure
+## Pre-update port (preferred when local edits are already commits on top of base)
+
+When the live tree is clean and the customizations live as commits above
+`git merge-base HEAD <target>`, port BEFORE running `hermes update`, so the
+update itself becomes a fast-forward and never autostashes anything.
+
+**`<target>` is the ref the updater will install, not `origin/main`.** Run
+`hermes update --check` first; on the stable channel it names a release tag
+(`stable vX.Y.Z (<sha>)`) that is usually far behind main. Resolve that sha and use
+it everywhere below. A branch built on main cannot fast-forward onto the release
+(the ff-only step aborts and the update ships vanilla), and sizing the jump against
+main overstates the collision risk by an order of magnitude. If you already ported
+against main, do not rebase it — re-run `git am -3` of the same patch series onto the
+release sha in a second worktree (a small jump usually applies with zero conflicts in
+seconds) and gate that branch; keep the main port as evidence the patches survive
+the future tree.
+
+1. Size the collision per file first — ours vs theirs line counts against the base;
+   files with both sides non-zero will conflict, ours-only files port clean:
+   `T=<target-sha>; B=$(git merge-base HEAD $T); for f in $(git diff --name-only $B HEAD); do echo "$f: ours $(git diff $B HEAD -- $f | grep -c '^[+-][^+-]') / theirs $(git diff $B $T -- $f | grep -c '^[+-][^+-]')"; done`
+   Also grep the target for each patch's behaviour — an upstreamed fix is an
+   OBSOLETE patch, not a port.
+2. Freeze the series: `git tag -f rollback/pre-update-<ts> HEAD`;
+   `git format-patch -o <prep-dir> $B..HEAD` (merge commits drop out — expected);
+   `git bundle create <prep-dir>/local-commits.bundle $B..HEAD`; write base/head/target
+   SHAs to `<prep-dir>/REFS.txt`. Patch files are the spec a port job reads.
+3. `git worktree add <scratch>/wt-core-port $T -b local/patches-<ts>` and
+   run ONE port job there (claude -p, systemd-run unit, MCP off). Brief contract per
+   patch: `git am -3`; on conflict `git am --abort` then exactly one of
+   **obsolete** (must quote the upstream file:line that implements it and make the
+   patch's test pass unchanged), **re-port** by hand to where the code lives now
+   (commit as `port: <original message>`), or **undecidable** (record the product
+   question, continue with the next patch — never guess). Ours-only modules must
+   land with their tests.
+4. Gate on the branch (rule 1): py_compile of `git diff --name-only $T`,
+   pytest of the CARRIED tests only inside the port job, import smoke on the runtime
+   interpreter. Keep the broad upstream suite OUT of the coder's brief and say so
+   explicitly ("do NOT run tests for every touched module; list the test files the
+   patches add or edit and run exactly those"): a coder left to its own judgement
+   resolves "touched modules" to 100+ files on a big jump and parks the job for
+   30+ minutes with no report (pytest `-q` prints nothing until the end). Run the
+   broad suite as a separate `systemd-run --user` unit with the differential recipe
+   below (`-rfE`, base vs merged, `newfail=0`), polled by its summary log.
+   A smoke failure on a module upstream newly
+   requires is expected pre-update (the venv matches the old lock) — report the
+   module name, do not install; a SyntaxError/ImportError in ported code is a fix.
+5. The runner then does `hermes update` → `git merge --ff-only local/patches-<ts>`
+   → gates again on the rebuilt venv → restart. Launch it through the oneshot
+   `hermes-core-update.service` unit (Environment= `PORT_BRANCH`, `ROLLBACK_TAG`),
+   not an inline `systemd-run` — see SKILL.md §3. The autostash path below is the
+   fallback for edits that were never committed.
+
+## Procedure (uncommitted edits: autostash path)
 
 1. **Extract per-file diffs from the stash** (`git stash show -p stash@{0} -- <f>`)
    into `patches/<name>.diff` so each port job has an exact spec, not a memory.
