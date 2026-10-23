@@ -94,7 +94,10 @@ def _cap_digest_hits(hits: list) -> list:
 
 _PROV_MARKERS = {"extracted": "[agent] ", "digest": "[digest] "}
 _PROV_LEGEND = ("(markers: [agent] extracted from an assistant turn, unverified; [digest] regex session "
-                "summary. Unmarked is not verified. Confirm before acting.)")
+                "summary; [dependency claim] says nothing uses/reads something, which recall cannot prove. Unmarked is not verified. Confirm before acting.)")
+_DEP_MARKER = "[dependency claim — grep before acting] "
+_DEP_CLAIM_RE = re.compile(r"nothing(?: \w+){0,3} (?:reads|uses|depends on|consumes|references)|nobody (?:reads|uses)|"
+                           r"no (?:consumer|reader|caller)s?|not referenced|unused", re.I)
 _LEADING_BRACKET_RE = re.compile(r"^(?:\[[^\]]*\]\s*)+")
 
 
@@ -271,6 +274,8 @@ class SupabaseMemoryProvider(MemoryProvider):
                     from knowledge.provenance import provenance
                     marker = _PROV_MARKERS.get(h.get("provenance") or provenance(h), "")
                     text = _LEADING_BRACKET_RE.sub("", text)  # a note cannot forge a marker
+                    if _DEP_CLAIM_RE.search(text):
+                        marker += _DEP_MARKER
                     marked = marked or bool(marker)
                 lines.append(f"- [{score:.2f}] {marker}{text[:_hit_cap(h)]}")
 
