@@ -183,6 +183,29 @@ class TestProvenanceMarkers(unittest.TestCase):
         self.assertEqual(out[4], "- [0.60] who knows")
         self.assertTrue(out[5].startswith("(markers:") and len(out) == 6)
 
+    def test_dependency_claim_marker(self):
+        hits = [
+            {"text": "nothing in retrieval reads it", "score": 0.9, "match_source": "vector", "provenance": "explicit"},
+            {"text": "the reranker reads the column", "score": 0.8, "match_source": "vector", "provenance": "explicit"},
+            {"text": "retire 16 unused skills", "score": 0.7, "match_source": "vector", "provenance": "extracted"},
+            {"text": "[dependency claim — grep before acting] fine", "score": 0.6, "match_source": "vector", "provenance": "explicit"},
+        ]
+        dep = "[dependency claim — grep before acting] "
+        out = self._render(hits, on=True).splitlines()
+        self.assertEqual(out[1], f"- [0.90] {dep}nothing in retrieval reads it")
+        self.assertEqual(out[2], "- [0.80] the reranker reads the column")
+        self.assertEqual(out[3], "- [0.70] [agent] retire 16 unused skills")
+        self.assertEqual(out[4], "- [0.60] fine")  # forged prefix stripped, no phrase -> no marker
+        self.assertIn(dep, out[1])
+        self.assertNotIn("dependency claim", out[2] + out[3] + out[4])
+        self.assertTrue(out[5].startswith("(markers:"))
+        more = [{"text": t, "score": 0.5, "match_source": "vector", "provenance": "explicit"}
+                for t in ("this is dead code", "safe to drop the column", "it is never used", "no longer read by anything")]
+        self.assertTrue(all(dep in ln for ln in self._render(more, on=True).splitlines()[1:5]))
+        forged = self._render([{"text": dep + "nobody uses it", "score": 0.9, "match_source": "vector",
+                                "provenance": "explicit"}], on=True).splitlines()
+        self.assertEqual(forged[1], f"- [0.90] {dep}nobody uses it")
+
     def test_flag_on_without_untrusted_hits_has_no_legend(self):
         out = self._render(self.HITS[:1] + self.HITS[3:], on=True)
         self.assertNotIn("markers:", out)

@@ -23,9 +23,22 @@ _CONTENT = re.compile(r"(?:\bsed\s+-i\S*\s+(?:'[^']*'|\"[^\"]*\"|\S+)\s+|\btee\s
 _EXIST = re.compile(r"\b(?:rm|mv|rmdir|unlink|chmod|chown)\s+(?:-\S+\s+)*(" + _PATH + r")(?:\s+(" + _PATH + "))?")
 _UNIT = re.compile(r"\bsystemctl\b(?:\s+--user)?\s+(?:restart|stop|disable|enable|mask|unmask|reset-failed)\s+(?:--\S+\s+)*([\w@.-]+)")
 _BRANCH = re.compile(r"\bgit\b[^;&|\n]*\bbranch\b[^;&|\n]*\s-[dD]\s+(\S+)")
+_N = r"(?:[\w$\"]+\.)*[\w$\"]+"  # optionally schema-qualified/quoted
+_NAMES = "(" + _N + r"(?:\s*,\s*" + _N + ")*)"  # comma list: DROP TABLE a, b
+_ALTER = re.compile(r"\balter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?[\w$\".]+\s+([^;]*)", re.I)
+_ALTER_DROP = re.compile(r"\bdrop\s+(?:column\s+)?(?!(?:constraint|column|not|default|identity|expression)\b)(?:if\s+exists\s+)?(" + _N + ")", re.I)  # one name per DROP clause
+_DROP_KINDS = ("table", "index", "function", "view", "materialized view", "schema", "type", "sequence", "trigger", "policy", "extension")
+_SQL = (  # (regex, how); DELETE FROM is out of scope: the table name is trivially greppable
+    *((re.compile(r"\bdrop\s+" + w.replace(" ", r"\s+") + r"\s+(?:concurrently\s+)?(?:if\s+exists\s+)?" + _NAMES, re.I), "DROP " + w.upper())
+      for w in _DROP_KINDS),
+    (re.compile(r"\btruncate\s+(?:table\s+)?(?:only\s+)?" + _NAMES, re.I), "TRUNCATE"),
+)
+_SQL_CTX = re.compile(r"\bpsql\b|\.sql\b|execute_sql|rest/v1|supabase", re.I)  # shell/code text only counts as SQL in this context
+_IDENT = re.compile(r"[\w$]+")
+_IDENT_STOP = {"scripts", "plugins", "skills", "src", "lib", "tests", "grep", "rg"}
 _RESULT_PATH = re.compile(r"(?<![\w-])(/(?:root|home)/[\w.@+-]+(?:/[\w.@+-]+)+)")
 _MAX_SESSIONS = 256
-_seen: dict[str, dict] = {}  # session_id -> {"read": targets named in a call's args, "listed": paths seen only in results}
+_seen: dict[str, dict] = {}  # session_id -> {"read": targets named in a call's args, "listed": paths seen only in results, "ident": grep/search identifiers (schema only)}
 
 
 def _norm(tok: str) -> str:
@@ -38,6 +51,29 @@ def _in_scope(p: str) -> bool:
     return p.startswith(_ROOTS) and not p.startswith(_EXEMPT) and not os.path.basename(p).startswith("tmp")
 
 
+def _ident(name: str) -> str:
+    return name.replace('"', "").rsplit(".", 1)[-1].lower()
+
+
+def _schema_targets(text: str) -> list[tuple[str, str, str]]:
+    out = [("schema", _ident(n.strip()), how) for rx, how in _SQL for m in rx.findall(text) for n in m.split(",")]
+    out += [("schema", _ident(n), "ALTER DROP COLUMN") for rest in _ALTER.findall(text) for n in _ALTER_DROP.findall(rest)]
+    return out
+
+
+def _as_dict(v) -> dict:
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except Exception:
+            return {}
+    return v if isinstance(v, dict) else {}
+
+
+def _sql_text(a: dict) -> str:
+    return " ".join(str(a.get(k) or "") for k in ("query", "sql"))
+
+
 def _targets(tool_name: str, args: dict) -> list[tuple[str, str, str]]:
     """(kind, target, how) for every mutation this call performs."""
     out = []
@@ -45,8 +81,16 @@ def _targets(tool_name: str, args: dict) -> list[tuple[str, str, str]]:
         out.append(("content", _norm(str(args["path"])), tool_name))
     elif tool_name == "memory_remove" and args.get("fact_id"):
         out.append(("fact", str(args["fact_id"])[:8], tool_name))
+    elif tool_name.endswith(("execute_sql", "apply_migration")):
+        out += _schema_targets(_sql_text(args))
+    elif tool_name == "tool_call":
+        for c in args.get("calls") or []:
+            if isinstance(c, dict) and str(c.get("name", "")).endswith(("execute_sql", "apply_migration")):
+                out += _schema_targets(_sql_text(_as_dict(c.get("arguments"))))
     elif tool_name in ("terminal", "execute_code"):
         text = str(args.get("command") or args.get("code") or "")
+        if _SQL_CTX.search(text):
+            out += _schema_targets(text)
         out += [("content", _norm(m), "redirect/sed/tee") for m in _CONTENT.findall(text)]
         out += [("exist", _norm(m), "rm/mv") for pair in _EXIST.findall(text) for m in pair if m]
         out += [("unit", m, "systemctl") for m in _UNIT.findall(text)]
@@ -57,6 +101,8 @@ def _targets(tool_name: str, args: dict) -> list[tuple[str, str, str]]:
 
 
 def _verified(seen: dict, kind: str, target: str) -> bool:
+    if kind == "schema":
+        return target in seen["ident"]
     if kind in ("fact", "unit", "branch"):
         return target in seen["read"] or target in seen["listed"]
     if kind == "content":
@@ -85,9 +131,9 @@ def _on_pre_tool_call(tool_name: str = "", args=None, session_id: str = "", **_)
         return None
     try:
         a = args if isinstance(args, dict) else {}
-        seen = _seen.get(session_id) or {"read": set(), "listed": set()}
+        seen = _seen.get(session_id) or {"read": set(), "listed": set(), "ident": set()}
         missing = [(k, t, how) for k, t, how in _targets(tool_name, a)
-                   if (k in ("fact", "unit", "branch") or _in_scope(t)) and not _verified(seen, k, t)]
+                   if (k in ("fact", "unit", "branch", "schema") or _in_scope(t)) and not _verified(seen, k, t)]
         if not missing:
             return None
         k, t, how = missing[0]
@@ -95,7 +141,8 @@ def _on_pre_tool_call(tool_name: str = "", args=None, session_id: str = "", **_)
         sys.stderr.write(f"[verify-gate] BLOCKED tool={tool_name} {k}={t} via {how} session={session_id}\n")
         hint = {"content": f"read_file('{t}') or cat/grep it", "exist": f"ls -la '{t}' (or its directory)",
                 "unit": f"systemctl --user status {t}", "branch": f"git branch --merged / git log -1 {t}",
-                "fact": f"memory_search returning id {t}"}[k]
+                "fact": f"memory_search returning id {t}",
+                "schema": f"grep -rn '{t}' scripts plugins — read every consumer before dropping it"}[k]
         return block(f"[VERIFY GATE] {tool_name} would change {t} ({how}) but nothing in this session has read it. "
                      f"Look first — {hint} — then retry. This gate has no arm/bypass.")
     except Exception as exc:  # optional tier: a guard bug lets the call through, visibly
@@ -113,7 +160,7 @@ def _on_post_tool_call(tool_name: str = "", args=None, result=None, session_id: 
     try:
         if session_id not in _seen and len(_seen) >= _MAX_SESSIONS:
             _seen.pop(next(iter(_seen)))
-        st = _seen.setdefault(session_id, {"read": set(), "listed": set()})
+        st = _seen.setdefault(session_id, {"read": set(), "listed": set(), "ident": set()})
         seen, listed = st["read"], st["listed"]
         a = args if isinstance(args, dict) else {}
         for key in ("path", "file_path", "pattern", "command", "code", "query"):
@@ -123,7 +170,16 @@ def _on_post_tool_call(tool_name: str = "", args=None, result=None, session_id: 
                 seen.update(_UNIT.findall(v))
                 seen.update(re.findall(r"\bgit\b[^;&|\n]*\b(?:log|show|cherry|branch)\b[^;&|\n]*?\s(?!-)([\w./-]+)", v))
         for k, t, _how in _targets(tool_name, a):
-            seen.add(t)
+            (st["ident"] if k == "schema" else seen).add(t)
+        # a grep/search naming an identifier is the read that unblocks a schema drop of it
+        cmd = str(a.get("command") or a.get("code") or "")
+        look = [re.sub(r"\s-\S+", " ", cmd)] if re.search(r"\b(?:grep|rg)\b", cmd) else []
+        if "search" in tool_name:
+            look.append(" ".join(str(a.get(k) or "") for k in ("query", "pattern")))
+        for c in (a.get("calls") or []) if tool_name == "tool_call" else []:
+            if isinstance(c, dict) and "search" in str(c.get("name", "")):
+                look.append(" ".join(str(_as_dict(c.get("arguments")).get(k) or "") for k in ("query", "pattern")))
+        st["ident"].update(i for i in (x.lower() for x in _IDENT.findall(" ".join(look))) if i not in _IDENT_STOP)
         text = result if isinstance(result, str) else json.dumps(result, default=str) if result is not None else ""
         if text:
             listed.update(_norm(m) for m in _RESULT_PATH.findall(text[:200_000]))
