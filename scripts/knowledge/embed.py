@@ -45,13 +45,18 @@ EMBEDDING_MODEL = env("EMBEDDING_MODEL", "nomic-embed-text")
 # search against the halfvec(2560) column. 0 / unset → omit the param (native dim).
 EMBEDDING_DIMENSIONS = int(env("EMBEDDING_DIMENSIONS", "0") or "0")
 
+MAX_EMBED_CHARS = 8000
+
 def _embed_remote(texts):
     """Call remote Ollama on Mac Studio for embeddings, chunking large batches."""
     BATCH_SIZE = 32
     all_embeddings = []
     for i in range(0, len(texts), BATCH_SIZE):
         chunk = texts[i:i+BATCH_SIZE]
-        body = {"model": EMBEDDING_MODEL, "input": chunk}
+        # Ollama's embed runner dies (HTTP 400 "EOF") on inputs over ~24k chars;
+        # the index builder already caps at 6000, this caps every caller (search, classifier, store).
+        # shortcut: char cap, not token-aware; use the model tokenizer if CJK/code inputs still 400.
+        body = {"model": EMBEDDING_MODEL, "input": [t[:MAX_EMBED_CHARS] for t in chunk]}
         if EMBEDDING_DIMENSIONS:
             body["dimensions"] = EMBEDDING_DIMENSIONS  # top-level MRL truncation
         payload = json.dumps(body)
