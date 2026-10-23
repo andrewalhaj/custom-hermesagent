@@ -95,14 +95,17 @@ def _iso(days_ago):
     return (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
 
 
-def _run_backfill(monkeypatch, tmp_path, capsys, rows, classify):
+def _run_backfill(monkeypatch, tmp_path, capsys, rows, classify, live_meta=None, urlopen=None):
     """Run main() with mocked store + HTTP; returns (stdout, PATCH requests, classifier inputs)."""
     import knowledge.storage as storage
     sent, seen = [], []
     monkeypatch.setattr(km, 'STATE_PATH', str(tmp_path / 'state.json'))
     monkeypatch.setattr(km, '_supa_all_rows', lambda **kw: rows)
     monkeypatch.setattr(km, 'get_supabase', lambda: ('http://x', 'k'))
-    monkeypatch.setattr(km.urllib.request, 'urlopen', lambda req, timeout: sent.append(req))
+    monkeypatch.setattr(km.urllib.request, 'urlopen', urlopen or (lambda req, timeout: sent.append(req)))
+    live = live_meta or {}
+    monkeypatch.setattr(km, '_supa_select', lambda q: [{'metadata': live.get(
+        q.split('id=eq.')[1], next(r['metadata'] for r in rows if r['id'] == q.split('id=eq.')[1]))}])
     monkeypatch.setattr(storage, '_classify_sector', lambda t: seen.append(t) or classify(t))
     monkeypatch.delenv('SECTOR_RETRY_DAYS', raising=False)
     km.main()
@@ -138,3 +141,53 @@ def test_report_line_counts_classified_abstained_skipped(monkeypatch, tmp_path, 
     out, _, _ = _run_backfill(monkeypatch, tmp_path, capsys, rows,
                               lambda t: ['dev'] if t == 'fact 1' else None)
     assert "Backfill: 1 classified, 1 abstained, 1 skipped (recent abstain) (of 3 unlabeled)" in out
+
+
+def test_whole_batch_abstain_of_three_or_more_is_not_marked(monkeypatch, tmp_path, capsys):
+    out, sent, seen = _run_backfill(monkeypatch, tmp_path, capsys, [_row(1), _row(2), _row(3)], lambda t: None)
+    assert len(seen) == 3 and sent == []
+    assert "Backfill: 0 classified, 3 abstained (not marked: whole batch abstained)" in out
+
+
+def test_marker_keeps_metadata_written_since_the_snapshot(monkeypatch, tmp_path, capsys):
+    _, sent, _ = _run_backfill(monkeypatch, tmp_path, capsys, [_row(1, metadata={'old': 1})], lambda t: None,
+                               live_meta={'id1': {'old': 1, 'new': 2}})
+    assert json.loads(sent[0].data)['metadata']['new'] == 2
+
+
+def test_failed_marker_patch_is_not_counted_as_abstained(monkeypatch, tmp_path, capsys):
+    def boom(req, timeout):
+        raise OSError('down')
+    out, _, _ = _run_backfill(monkeypatch, tmp_path, capsys, [_row(1)], lambda t: None, urlopen=boom)
+    assert "backfill FAIL id1" in out and "abstained" not in out
+
+
+def _run_one(monkeypatch, tmp_path, capsys, meta, env=None):
+    if env:
+        monkeypatch.setenv('SECTOR_RETRY_DAYS', env)
+    import knowledge.storage as storage
+    sent = []
+    (tmp_path / 'state.json').unlink(missing_ok=True)  # else the high-water mark exits early
+    monkeypatch.setattr(km, 'STATE_PATH', str(tmp_path / 'state.json'))
+    monkeypatch.setattr(km, '_supa_all_rows', lambda **kw: [_row(1, metadata=meta)])
+    monkeypatch.setattr(km, 'get_supabase', lambda: ('http://x', 'k'))
+    monkeypatch.setattr(km, '_supa_select', lambda q: [{'metadata': meta}])
+    monkeypatch.setattr(km.urllib.request, 'urlopen', lambda req, timeout: sent.append(req))
+    seen = []
+    monkeypatch.setattr(storage, '_classify_sector', lambda t: seen.append(t) or ['dev'])
+    km.main()
+    return seen
+
+
+def test_bad_retry_days_env_behaves_as_seven(monkeypatch, tmp_path, capsys):
+    assert _run_one(monkeypatch, tmp_path, capsys, {'sector_attempted_at': _iso(6)}, env='7d') == []
+    assert _run_one(monkeypatch, tmp_path, capsys, {'sector_attempted_at': _iso(8)}, env='7d') == ['fact 1']
+
+
+def test_garbage_marker_is_retried(monkeypatch, tmp_path, capsys):
+    assert _run_one(monkeypatch, tmp_path, capsys, {'sector_attempted_at': 'garbage'}) == ['fact 1']
+
+
+def test_naive_marker_is_retried(monkeypatch, tmp_path, capsys):
+    naive = datetime.now().isoformat()  # no tzinfo
+    assert _run_one(monkeypatch, tmp_path, capsys, {'sector_attempted_at': naive}) == ['fact 1']

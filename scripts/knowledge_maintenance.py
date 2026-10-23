@@ -25,7 +25,6 @@ sys.path.insert(0, SCRIPTS)
 DB_DIR    = os.path.expanduser('~/.hermes/knowledge_db')
 STATE_PATH = os.path.join(DB_DIR, 'maintenance_state.json')
 DELETED_LOG = os.path.join(DB_DIR, 'deleted_facts.jsonl')
-SECTOR_RETRY_DAYS = float(os.environ.get('SECTOR_RETRY_DAYS', '7'))  # an abstained row is not re-sent sooner
 os.makedirs(DB_DIR, exist_ok=True)
 
 from knowledge.supabase_client import _supa_all_rows, _supa_select, get_supabase
@@ -141,11 +140,26 @@ def main():
     skipped = 0
 
     def _recent_abstain(f):
+        # read lazily: a bad env value must not crash the import (storage.py imports this module)
+        try:
+            days = float(os.environ.get('SECTOR_RETRY_DAYS', '7'))  # an abstained row is not re-sent sooner
+        except ValueError:
+            days = 7
         at = (f.get('metadata') or {}).get('sector_attempted_at')
         try:
-            return datetime.now(timezone.utc) - datetime.fromisoformat(at) < timedelta(days=SECTOR_RETRY_DAYS)
+            return datetime.now(timezone.utc) - datetime.fromisoformat(at) < timedelta(days=days)
         except (TypeError, ValueError):
             return False
+
+    def _patch(fact_id, body):
+        req = urllib.request.Request(
+            f'{url}/rest/v1/knowledge?id=eq.{fact_id}',
+            data=json.dumps(body).encode(), method='PATCH')
+        req.add_header('apikey', key)
+        req.add_header('Authorization', f'Bearer {key}')
+        req.add_header('Content-Type', 'application/json')
+        req.add_header('Prefer', 'return=minimal')
+        urllib.request.urlopen(req, timeout=10)
 
     if unlabeled:
         try:
@@ -155,29 +169,36 @@ def main():
             paths = [_classify_sector((f['text'] or '')[:1500]) for f in todo]
 
             updates = [(f['id'], {'sector_path': p}) for f, p in zip(todo, paths) if p]
-            now = datetime.now(timezone.utc).isoformat()
-            marks = [(f['id'], {'metadata': {**(f.get('metadata') or {}), 'sector_attempted_at': now}})
-                     for f, p in zip(todo, paths) if not p]
-            abstained = len(marks)
+            abstain_ids = [f['id'] for f, p in zip(todo, paths) if not p]
+            # shortcut: cannot distinguish outage from abstain, so a wholly-abstained batch of 3+ is not marked;
+            # upgrade when _classify_sector reports errors distinctly.
+            note = ''
+            if not updates and len(todo) >= 3:
+                abstained, abstain_ids = len(abstain_ids), []
+                note = ' (not marked: whole batch abstained)'
 
-            for fact_id, body in updates + marks:
-                payload = json.dumps(body).encode()
-                req = urllib.request.Request(
-                    f'{url}/rest/v1/knowledge?id=eq.{fact_id}',
-                    data=payload, method='PATCH')
-                req.add_header('apikey', key)
-                req.add_header('Authorization', f'Bearer {key}')
-                req.add_header('Content-Type', 'application/json')
-                req.add_header('Prefer', 'return=minimal')
+            for fact_id, body in updates:
                 try:
-                    urllib.request.urlopen(req, timeout=10)
-                    classified += 'sector_path' in body
+                    _patch(fact_id, body)
+                    classified += 1
+                except Exception as e:
+                    report.append(f"  backfill FAIL {fact_id[:8]}: {e}")
+
+            now = datetime.now(timezone.utc).isoformat()
+            for fact_id in abstain_ids:
+                try:
+                    # fresh metadata: the start-of-run snapshot may be minutes stale
+                    cur = _supa_select(f'select=metadata&id=eq.{fact_id}')
+                    if not cur:
+                        continue
+                    _patch(fact_id, {'metadata': {**(cur[0].get('metadata') or {}), 'sector_attempted_at': now}})
+                    abstained += 1
                 except Exception as e:
                     report.append(f"  backfill FAIL {fact_id[:8]}: {e}")
 
             if classified or abstained:
                 report.append(f"🏷  Backfill: {classified} classified, "
-                             f"{abstained} abstained, "
+                             f"{abstained} abstained{note}, "
                              f"{skipped} skipped (recent abstain) "
                              f"(of {len(unlabeled)} unlabeled)")
         except Exception as e:
