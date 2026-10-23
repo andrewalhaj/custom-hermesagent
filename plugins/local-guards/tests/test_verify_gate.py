@@ -158,3 +158,9 @@ def test_memory_search_satisfies_schema(vg):
     mod, _ = vg
     post(mod, "memory_search", result="", query="who uses foo")
     assert pre(mod, "tool_call", **sql_call("DROP TABLE foo")) is None
+
+
+def test_grep_does_not_satisfy_branch_delete(vg):
+    mod, _ = vg
+    post(mod, "terminal", result="", command="grep -rn foo scripts")
+    assert pre(mod, "terminal", command="git branch -D foo")["action"] == "block"

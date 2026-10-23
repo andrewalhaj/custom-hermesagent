@@ -33,7 +33,7 @@ _SQL = (  # (regex, how); DELETE FROM is out of scope: the table name is trivial
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _RESULT_PATH = re.compile(r"(?<![\w-])(/(?:root|home)/[\w.@+-]+(?:/[\w.@+-]+)+)")
 _MAX_SESSIONS = 256
-_seen: dict[str, dict] = {}  # session_id -> {"read": targets named in a call's args, "listed": paths seen only in results}
+_seen: dict[str, dict] = {}  # session_id -> {"read": targets named in a call's args, "listed": paths seen only in results, "ident": grep/search identifiers (schema only)}
 
 
 def _norm(tok: str) -> str:
@@ -75,8 +75,10 @@ def _targets(tool_name: str, args: dict) -> list[tuple[str, str, str]]:
 
 
 def _verified(seen: dict, kind: str, target: str) -> bool:
-    if kind in ("fact", "unit", "branch", "schema"):
-        return target in seen["read"] or (kind != "schema" and target in seen["listed"])
+    if kind == "schema":
+        return target in seen["ident"]
+    if kind in ("fact", "unit", "branch"):
+        return target in seen["read"] or target in seen["listed"]
     if kind == "content":
         return not os.path.exists(target) or target in seen["read"]  # new file: nothing to read first
     p = target
@@ -103,7 +105,7 @@ def _on_pre_tool_call(tool_name: str = "", args=None, session_id: str = "", **_)
         return None
     try:
         a = args if isinstance(args, dict) else {}
-        seen = _seen.get(session_id) or {"read": set(), "listed": set()}
+        seen = _seen.get(session_id) or {"read": set(), "listed": set(), "ident": set()}
         missing = [(k, t, how) for k, t, how in _targets(tool_name, a)
                    if (k in ("fact", "unit", "branch", "schema") or _in_scope(t)) and not _verified(seen, k, t)]
         if not missing:
@@ -132,7 +134,7 @@ def _on_post_tool_call(tool_name: str = "", args=None, result=None, session_id: 
     try:
         if session_id not in _seen and len(_seen) >= _MAX_SESSIONS:
             _seen.pop(next(iter(_seen)))
-        st = _seen.setdefault(session_id, {"read": set(), "listed": set()})
+        st = _seen.setdefault(session_id, {"read": set(), "listed": set(), "ident": set()})
         seen, listed = st["read"], st["listed"]
         a = args if isinstance(args, dict) else {}
         for key in ("path", "file_path", "pattern", "command", "code", "query"):
@@ -142,11 +144,11 @@ def _on_post_tool_call(tool_name: str = "", args=None, result=None, session_id: 
                 seen.update(_UNIT.findall(v))
                 seen.update(re.findall(r"\bgit\b[^;&|\n]*\b(?:log|show|cherry|branch)\b[^;&|\n]*?\s(?!-)([\w./-]+)", v))
         for k, t, _how in _targets(tool_name, a):
-            seen.add(t)
+            (st["ident"] if k == "schema" else seen).add(t)
         # a grep/search naming an identifier is the read that unblocks a schema drop of it
         look = (str(a.get("command") or a.get("code") or "") if re.search(r"\b(?:grep|rg)\b", str(a.get("command") or a.get("code") or ""))
                 else " ".join(str(a.get(k) or "") for k in ("query", "pattern")) if tool_name in ("memory_search", "search_files") else "")
-        seen.update(i.lower() for i in _IDENT.findall(look))
+        st["ident"].update(i.lower() for i in _IDENT.findall(look))
         text = result if isinstance(result, str) else json.dumps(result, default=str) if result is not None else ""
         if text:
             listed.update(_norm(m) for m in _RESULT_PATH.findall(text[:200_000]))
