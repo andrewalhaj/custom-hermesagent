@@ -94,10 +94,11 @@ def _cap_digest_hits(hits: list) -> list:
 
 _PROV_MARKERS = {"extracted": "[agent] ", "digest": "[digest] "}
 _PROV_LEGEND = ("(markers: [agent] extracted from an assistant turn, unverified; [digest] regex session "
-                "summary; [dependency claim] says nothing uses/reads something, which recall cannot prove. Unmarked is not verified. Confirm before acting.)")
+                "summary; [dependency claim — grep before acting] says nothing uses/reads something, which recall cannot prove. Unmarked is not verified. Confirm before acting.)")
 _DEP_MARKER = "[dependency claim — grep before acting] "
 _DEP_CLAIM_RE = re.compile(r"nothing(?: \w+){0,3} (?:reads|uses|depends on|consumes|references)|nobody (?:reads|uses)|"
-                           r"no (?:consumer|reader|caller)s?|not referenced", re.I)
+                           r"no (?:consumer|reader|caller)s?|not referenced|"
+                           r"never used|no longer (?:used|read)|dead code|safe to (?:delete|remove|drop)", re.I)
 _LEADING_BRACKET_RE = re.compile(r"^(?:\[[^\]]*\]\s*)+")
 
 

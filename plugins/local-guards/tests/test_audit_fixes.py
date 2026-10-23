@@ -196,7 +196,12 @@ class TestProvenanceMarkers(unittest.TestCase):
         self.assertEqual(out[2], "- [0.80] the reranker reads the column")
         self.assertEqual(out[3], "- [0.70] [agent] retire 16 unused skills")
         self.assertEqual(out[4], "- [0.60] fine")  # forged prefix stripped, no phrase -> no marker
-        self.assertTrue(out[5].startswith("(markers:") and "dependency claim" in out[5])
+        self.assertIn(dep, out[1])
+        self.assertNotIn("dependency claim", out[2] + out[3] + out[4])
+        self.assertTrue(out[5].startswith("(markers:"))
+        more = [{"text": t, "score": 0.5, "match_source": "vector", "provenance": "explicit"}
+                for t in ("this is dead code", "safe to drop the column", "it is never used", "no longer read by anything")]
+        self.assertTrue(all(dep in ln for ln in self._render(more, on=True).splitlines()[1:5]))
         forged = self._render([{"text": dep + "nobody uses it", "score": 0.9, "match_source": "vector",
                                 "provenance": "explicit"}], on=True).splitlines()
         self.assertEqual(forged[1], f"- [0.90] {dep}nobody uses it")
