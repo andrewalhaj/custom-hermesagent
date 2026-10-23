@@ -23,14 +23,19 @@ _CONTENT = re.compile(r"(?:\bsed\s+-i\S*\s+(?:'[^']*'|\"[^\"]*\"|\S+)\s+|\btee\s
 _EXIST = re.compile(r"\b(?:rm|mv|rmdir|unlink|chmod|chown)\s+(?:-\S+\s+)*(" + _PATH + r")(?:\s+(" + _PATH + "))?")
 _UNIT = re.compile(r"\bsystemctl\b(?:\s+--user)?\s+(?:restart|stop|disable|enable|mask|unmask|reset-failed)\s+(?:--\S+\s+)*([\w@.-]+)")
 _BRANCH = re.compile(r"\bgit\b[^;&|\n]*\bbranch\b[^;&|\n]*\s-[dD]\s+(\S+)")
-_NAME = r"((?:[\w$\"]+\.)*[\w$\"]+)"  # optionally schema-qualified/quoted
+_N = r"(?:[\w$\"]+\.)*[\w$\"]+"  # optionally schema-qualified/quoted
+_NAMES = "(" + _N + r"(?:\s*,\s*" + _N + ")*)"  # comma list: DROP TABLE a, b
+_ALTER = re.compile(r"\balter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?[\w$\".]+\s+([^;]*)", re.I)
+_ALTER_DROP = re.compile(r"\bdrop\s+(?:column\s+)?(?!(?:constraint|column|not|default|identity|expression)\b)(?:if\s+exists\s+)?(" + _N + ")", re.I)  # one name per DROP clause
+_DROP_KINDS = ("table", "index", "function", "view", "materialized view", "schema", "type", "sequence", "trigger", "policy", "extension")
 _SQL = (  # (regex, how); DELETE FROM is out of scope: the table name is trivially greppable
-    (re.compile(r"\balter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?[\w$\".]+\s+drop\s+column\s+(?:if\s+exists\s+)?" + _NAME, re.I), "ALTER DROP COLUMN"),
-    *((re.compile(r"\bdrop\s+" + w + r"\s+(?:concurrently\s+)?(?:if\s+exists\s+)?" + _NAME, re.I), "DROP " + w.upper())
-      for w in ("table", "index", "function", "view")),
-    (re.compile(r"\btruncate\s+(?:table\s+)?(?:only\s+)?" + _NAME, re.I), "TRUNCATE"),
+    *((re.compile(r"\bdrop\s+" + w.replace(" ", r"\s+") + r"\s+(?:concurrently\s+)?(?:if\s+exists\s+)?" + _NAMES, re.I), "DROP " + w.upper())
+      for w in _DROP_KINDS),
+    (re.compile(r"\btruncate\s+(?:table\s+)?(?:only\s+)?" + _NAMES, re.I), "TRUNCATE"),
 )
-_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_SQL_CTX = re.compile(r"\bpsql\b|\.sql\b|execute_sql|rest/v1|supabase", re.I)  # shell/code text only counts as SQL in this context
+_IDENT = re.compile(r"[\w$]+")
+_IDENT_STOP = {"scripts", "plugins", "skills", "src", "lib", "tests", "grep", "rg"}
 _RESULT_PATH = re.compile(r"(?<![\w-])(/(?:root|home)/[\w.@+-]+(?:/[\w.@+-]+)+)")
 _MAX_SESSIONS = 256
 _seen: dict[str, dict] = {}  # session_id -> {"read": targets named in a call's args, "listed": paths seen only in results, "ident": grep/search identifiers (schema only)}
@@ -46,8 +51,27 @@ def _in_scope(p: str) -> bool:
     return p.startswith(_ROOTS) and not p.startswith(_EXEMPT) and not os.path.basename(p).startswith("tmp")
 
 
+def _ident(name: str) -> str:
+    return name.replace('"', "").rsplit(".", 1)[-1].lower()
+
+
 def _schema_targets(text: str) -> list[tuple[str, str, str]]:
-    return [("schema", m.replace('"', "").rsplit(".", 1)[-1].lower(), how) for rx, how in _SQL for m in rx.findall(text)]
+    out = [("schema", _ident(n.strip()), how) for rx, how in _SQL for m in rx.findall(text) for n in m.split(",")]
+    out += [("schema", _ident(n), "ALTER DROP COLUMN") for rest in _ALTER.findall(text) for n in _ALTER_DROP.findall(rest)]
+    return out
+
+
+def _as_dict(v) -> dict:
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except Exception:
+            return {}
+    return v if isinstance(v, dict) else {}
+
+
+def _sql_text(a: dict) -> str:
+    return " ".join(str(a.get(k) or "") for k in ("query", "sql"))
 
 
 def _targets(tool_name: str, args: dict) -> list[tuple[str, str, str]]:
@@ -57,14 +81,16 @@ def _targets(tool_name: str, args: dict) -> list[tuple[str, str, str]]:
         out.append(("content", _norm(str(args["path"])), tool_name))
     elif tool_name == "memory_remove" and args.get("fact_id"):
         out.append(("fact", str(args["fact_id"])[:8], tool_name))
+    elif tool_name.endswith(("execute_sql", "apply_migration")):
+        out += _schema_targets(_sql_text(args))
     elif tool_name == "tool_call":
         for c in args.get("calls") or []:
             if isinstance(c, dict) and str(c.get("name", "")).endswith(("execute_sql", "apply_migration")):
-                a = c.get("arguments") if isinstance(c.get("arguments"), dict) else {}
-                out += _schema_targets(" ".join(str(a.get(k) or "") for k in ("query", "sql")))
+                out += _schema_targets(_sql_text(_as_dict(c.get("arguments"))))
     elif tool_name in ("terminal", "execute_code"):
         text = str(args.get("command") or args.get("code") or "")
-        out += _schema_targets(text)
+        if _SQL_CTX.search(text):
+            out += _schema_targets(text)
         out += [("content", _norm(m), "redirect/sed/tee") for m in _CONTENT.findall(text)]
         out += [("exist", _norm(m), "rm/mv") for pair in _EXIST.findall(text) for m in pair if m]
         out += [("unit", m, "systemctl") for m in _UNIT.findall(text)]
@@ -146,9 +172,14 @@ def _on_post_tool_call(tool_name: str = "", args=None, result=None, session_id: 
         for k, t, _how in _targets(tool_name, a):
             (st["ident"] if k == "schema" else seen).add(t)
         # a grep/search naming an identifier is the read that unblocks a schema drop of it
-        look = (str(a.get("command") or a.get("code") or "") if re.search(r"\b(?:grep|rg)\b", str(a.get("command") or a.get("code") or ""))
-                else " ".join(str(a.get(k) or "") for k in ("query", "pattern")) if tool_name in ("memory_search", "search_files") else "")
-        st["ident"].update(i.lower() for i in _IDENT.findall(look))
+        cmd = str(a.get("command") or a.get("code") or "")
+        look = [re.sub(r"\s-\S+", " ", cmd)] if re.search(r"\b(?:grep|rg)\b", cmd) else []
+        if "search" in tool_name:
+            look.append(" ".join(str(a.get(k) or "") for k in ("query", "pattern")))
+        for c in (a.get("calls") or []) if tool_name == "tool_call" else []:
+            if isinstance(c, dict) and "search" in str(c.get("name", "")):
+                look.append(" ".join(str(_as_dict(c.get("arguments")).get(k) or "") for k in ("query", "pattern")))
+        st["ident"].update(i for i in (x.lower() for x in _IDENT.findall(" ".join(look))) if i not in _IDENT_STOP)
         text = result if isinstance(result, str) else json.dumps(result, default=str) if result is not None else ""
         if text:
             listed.update(_norm(m) for m in _RESULT_PATH.findall(text[:200_000]))

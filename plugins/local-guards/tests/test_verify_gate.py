@@ -164,3 +164,65 @@ def test_grep_does_not_satisfy_branch_delete(vg):
     mod, _ = vg
     post(mod, "terminal", result="", command="grep -rn foo scripts")
     assert pre(mod, "terminal", command="git branch -D foo")["action"] == "block"
+
+
+def test_multi_name_drop_needs_every_name_grepped(vg):
+    mod, _ = vg
+    post(mod, "terminal", result="", command="grep -rn a scripts")
+    r = pre(mod, "tool_call", **sql_call("DROP TABLE a, b"))
+    assert r["action"] == "block" and "'b'" in r["message"]
+    post(mod, "terminal", result="", command="grep -rn b scripts")
+    assert pre(mod, "tool_call", **sql_call("DROP TABLE a, b")) is None
+    assert pre(mod, "tool_call", **sql_call("TRUNCATE x, y"))["action"] == "block"
+
+
+def test_alter_drop_without_column_keyword_and_lists(vg):
+    mod, _ = vg
+    assert "tags" in pre(mod, "tool_call", **sql_call("ALTER TABLE t DROP tags"))["message"]
+    post(mod, "terminal", result="", command="grep -rn a scripts")
+    assert "'b'" in pre(mod, "tool_call", **sql_call("ALTER TABLE t DROP COLUMN a, DROP COLUMN b"))["message"]
+
+
+@pytest.mark.parametrize("sql", ["ALTER TABLE t DROP CONSTRAINT c", "ALTER TABLE t ALTER COLUMN x DROP NOT NULL"])
+def test_alter_drop_constraint_and_not_null_pass(vg, sql):
+    mod, _ = vg
+    assert pre(mod, "tool_call", **sql_call(sql)) is None
+
+
+@pytest.mark.parametrize("sql,ident", [
+    ("DROP POLICY p ON t", "p"),
+    ("DROP SCHEMA s CASCADE", "s"),
+    ("DROP INDEX CONCURRENTLY i", "i"),
+    ('DROP TABLE "public"."Items"', "items"),
+    ("DROP MATERIALIZED VIEW mv", "mv"),
+])
+def test_more_drop_kinds(vg, sql, ident):
+    mod, _ = vg
+    assert f"grep -rn '{ident}'" in pre(mod, "tool_call", **sql_call(sql))["message"]
+
+
+def test_direct_mcp_tool_name_dict_and_json_string_args(vg):
+    mod, _ = vg
+    assert pre(mod, "mcp__supabase__execute_sql", query="DROP TABLE foo")["action"] == "block"
+    assert pre(mod, "mcp__supabase__apply_migration", sql="DROP TABLE foo")["action"] == "block"
+    call = {"calls": [{"name": "execute_sql", "arguments": '{"query": "DROP TABLE foo"}'}]}
+    assert pre(mod, "tool_call", **call)["action"] == "block"
+    pre(mod, "tool_call", calls=[{"name": "execute_sql", "arguments": "not json"}])  # must not raise
+
+
+def test_tool_call_wrapped_memory_search_satisfies(vg):
+    mod, _ = vg
+    post(mod, "tool_call", result="", calls=[{"name": "memory_search", "arguments": {"query": "who uses foo"}}])
+    assert pre(mod, "tool_call", **sql_call("DROP TABLE foo")) is None
+
+
+def test_terminal_without_sql_context_passes(vg):
+    mod, _ = vg
+    assert pre(mod, "terminal", command='git commit -m "drop table x"') is None
+
+
+def test_grep_flags_and_path_words_are_not_idents(vg):
+    mod, _ = vg
+    post(mod, "terminal", result="", command="grep -rn foo scripts plugins")
+    assert not {"rn", "scripts", "plugins", "grep"} & mod._seen["s1"]["ident"]
+    assert "foo" in mod._seen["s1"]["ident"]
