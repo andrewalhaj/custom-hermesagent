@@ -15,7 +15,7 @@ State: ~/.hermes/knowledge_db/maintenance_state.json
 """
 import os, re, sys, json, time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 # ── Paths ───────────────────────────────────────────────────────────────
@@ -25,6 +25,7 @@ sys.path.insert(0, SCRIPTS)
 DB_DIR    = os.path.expanduser('~/.hermes/knowledge_db')
 STATE_PATH = os.path.join(DB_DIR, 'maintenance_state.json')
 DELETED_LOG = os.path.join(DB_DIR, 'deleted_facts.jsonl')
+SECTOR_RETRY_DAYS = float(os.environ.get('SECTOR_RETRY_DAYS', '7'))  # an abstained row is not re-sent sooner
 os.makedirs(DB_DIR, exist_ok=True)
 
 from knowledge.supabase_client import _supa_all_rows, _supa_select, get_supabase
@@ -94,7 +95,7 @@ def main():
 
     # Fetch all facts
     try:
-        facts = _supa_all_rows(select='id,text,stored_at,sector_path', page=500)
+        facts = _supa_all_rows(select='id,text,stored_at,sector_path,metadata', page=500)
     except Exception as e:
         print(f"❌ knowledge_maintenance: fetch failed: {e}")
         sys.exit(1)
@@ -129,7 +130,7 @@ def main():
 
         # Refresh facts list after deletion
         try:
-            facts = _supa_all_rows(select='id,text,stored_at,sector_path', page=500)
+            facts = _supa_all_rows(select='id,text,stored_at,sector_path,metadata', page=500)
         except Exception:
             pass
 
@@ -137,17 +138,30 @@ def main():
     unlabeled = [f for f in facts if not f.get('sector_path')]
     classified = 0
     abstained = 0
+    skipped = 0
+
+    def _recent_abstain(f):
+        at = (f.get('metadata') or {}).get('sector_attempted_at')
+        try:
+            return datetime.now(timezone.utc) - datetime.fromisoformat(at) < timedelta(days=SECTOR_RETRY_DAYS)
+        except (TypeError, ValueError):
+            return False
 
     if unlabeled:
         try:
             from knowledge.storage import _classify_sector  # Jev tree walk by default, centroid fallback
-            paths = [_classify_sector((f['text'] or '')[:1500]) for f in unlabeled]
+            todo = [f for f in unlabeled if not _recent_abstain(f)]
+            skipped = len(unlabeled) - len(todo)
+            paths = [_classify_sector((f['text'] or '')[:1500]) for f in todo]
 
-            updates = [(f['id'], p) for f, p in zip(unlabeled, paths) if p]
-            abstained = sum(1 for p in paths if not p)
+            updates = [(f['id'], {'sector_path': p}) for f, p in zip(todo, paths) if p]
+            now = datetime.now(timezone.utc).isoformat()
+            marks = [(f['id'], {'metadata': {**(f.get('metadata') or {}), 'sector_attempted_at': now}})
+                     for f, p in zip(todo, paths) if not p]
+            abstained = len(marks)
 
-            for fact_id, path in updates:
-                payload = json.dumps({'sector_path': path}).encode()
+            for fact_id, body in updates + marks:
+                payload = json.dumps(body).encode()
                 req = urllib.request.Request(
                     f'{url}/rest/v1/knowledge?id=eq.{fact_id}',
                     data=payload, method='PATCH')
@@ -157,13 +171,14 @@ def main():
                 req.add_header('Prefer', 'return=minimal')
                 try:
                     urllib.request.urlopen(req, timeout=10)
-                    classified += 1
+                    classified += 'sector_path' in body
                 except Exception as e:
                     report.append(f"  backfill FAIL {fact_id[:8]}: {e}")
 
             if classified or abstained:
                 report.append(f"🏷  Backfill: {classified} classified, "
-                             f"{abstained} abstained "
+                             f"{abstained} abstained, "
+                             f"{skipped} skipped (recent abstain) "
                              f"(of {len(unlabeled)} unlabeled)")
         except Exception as e:
             report.append(f"⚠️  Backfill skipped: {e}")

@@ -85,3 +85,56 @@ def test_all_rows_walks_each_row_once_while_rows_land(monkeypatch):
     originals = [s for s in served if not s.startswith('n')]
     assert sorted(originals) == [f'{i:02d}' for i in range(1, 8)]
     assert len(served) == len(set(served))
+
+
+# ── Step 2: abstain-once marker ──────────────────────────────────────────
+from datetime import datetime, timedelta, timezone
+
+
+def _iso(days_ago):
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+
+
+def _run_backfill(monkeypatch, tmp_path, capsys, rows, classify):
+    """Run main() with mocked store + HTTP; returns (stdout, PATCH requests, classifier inputs)."""
+    import knowledge.storage as storage
+    sent, seen = [], []
+    monkeypatch.setattr(km, 'STATE_PATH', str(tmp_path / 'state.json'))
+    monkeypatch.setattr(km, '_supa_all_rows', lambda **kw: rows)
+    monkeypatch.setattr(km, 'get_supabase', lambda: ('http://x', 'k'))
+    monkeypatch.setattr(km.urllib.request, 'urlopen', lambda req, timeout: sent.append(req))
+    monkeypatch.setattr(storage, '_classify_sector', lambda t: seen.append(t) or classify(t))
+    monkeypatch.delenv('SECTOR_RETRY_DAYS', raising=False)
+    km.main()
+    return capsys.readouterr().out, sent, seen
+
+
+def _row(i, **kw):
+    return {'id': f'id{i}', 'text': f'fact {i}', 'stored_at': f'2026-01-{i:02d}', 'sector_path': None, 'metadata': None, **kw}
+
+
+def test_abstained_row_gets_marker_merged_into_metadata(monkeypatch, tmp_path, capsys):
+    rows = [_row(1, metadata={'k': 'v'})]
+    _, sent, _ = _run_backfill(monkeypatch, tmp_path, capsys, rows, lambda t: None)
+    assert len(sent) == 1 and sent[0].method == 'PATCH' and sent[0].full_url.endswith('id=eq.id1')
+    meta = json.loads(sent[0].data)['metadata']
+    assert meta['k'] == 'v' and datetime.fromisoformat(meta['sector_attempted_at']).tzinfo is not None
+
+
+def test_fresh_marker_is_skipped_without_calling_classifier(monkeypatch, tmp_path, capsys):
+    rows = [_row(1, metadata={'sector_attempted_at': _iso(1)})]
+    _, sent, seen = _run_backfill(monkeypatch, tmp_path, capsys, rows, lambda t: None)
+    assert seen == [] and sent == []
+
+
+def test_old_marker_is_retried(monkeypatch, tmp_path, capsys):
+    rows = [_row(1, metadata={'sector_attempted_at': _iso(8)})]
+    _, sent, seen = _run_backfill(monkeypatch, tmp_path, capsys, rows, lambda t: ['dev'])
+    assert seen == ['fact 1'] and json.loads(sent[0].data) == {'sector_path': ['dev']}
+
+
+def test_report_line_counts_classified_abstained_skipped(monkeypatch, tmp_path, capsys):
+    rows = [_row(1), _row(2), _row(3, metadata={'sector_attempted_at': _iso(0)})]
+    out, _, _ = _run_backfill(monkeypatch, tmp_path, capsys, rows,
+                              lambda t: ['dev'] if t == 'fact 1' else None)
+    assert "Backfill: 1 classified, 1 abstained, 1 skipped (recent abstain) (of 3 unlabeled)" in out
