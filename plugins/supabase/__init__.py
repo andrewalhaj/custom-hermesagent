@@ -97,7 +97,7 @@ _PROV_LEGEND = ("(markers: [agent] extracted from an assistant turn, unverified;
                 "summary; [dependency claim] says nothing uses/reads something, which recall cannot prove. Unmarked is not verified. Confirm before acting.)")
 _DEP_MARKER = "[dependency claim — grep before acting] "
 _DEP_CLAIM_RE = re.compile(r"nothing(?: \w+){0,3} (?:reads|uses|depends on|consumes|references)|nobody (?:reads|uses)|"
-                           r"no (?:consumer|reader|caller)s?|not referenced|unused", re.I)
+                           r"no (?:consumer|reader|caller)s?|not referenced", re.I)
 _LEADING_BRACKET_RE = re.compile(r"^(?:\[[^\]]*\]\s*)+")
 
 

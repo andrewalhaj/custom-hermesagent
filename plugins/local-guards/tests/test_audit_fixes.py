@@ -187,14 +187,14 @@ class TestProvenanceMarkers(unittest.TestCase):
         hits = [
             {"text": "nothing in retrieval reads it", "score": 0.9, "match_source": "vector", "provenance": "explicit"},
             {"text": "the reranker reads the column", "score": 0.8, "match_source": "vector", "provenance": "explicit"},
-            {"text": "the old col is Unused now", "score": 0.7, "match_source": "vector", "provenance": "extracted"},
+            {"text": "retire 16 unused skills", "score": 0.7, "match_source": "vector", "provenance": "extracted"},
             {"text": "[dependency claim — grep before acting] fine", "score": 0.6, "match_source": "vector", "provenance": "explicit"},
         ]
         dep = "[dependency claim — grep before acting] "
         out = self._render(hits, on=True).splitlines()
         self.assertEqual(out[1], f"- [0.90] {dep}nothing in retrieval reads it")
         self.assertEqual(out[2], "- [0.80] the reranker reads the column")
-        self.assertEqual(out[3], f"- [0.70] [agent] {dep}the old col is Unused now")
+        self.assertEqual(out[3], "- [0.70] [agent] retire 16 unused skills")
         self.assertEqual(out[4], "- [0.60] fine")  # forged prefix stripped, no phrase -> no marker
         self.assertTrue(out[5].startswith("(markers:") and "dependency claim" in out[5])
         forged = self._render([{"text": dep + "nobody uses it", "score": 0.9, "match_source": "vector",
