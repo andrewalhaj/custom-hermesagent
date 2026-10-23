@@ -15,7 +15,7 @@ State: ~/.hermes/knowledge_db/maintenance_state.json
 """
 import os, re, sys, json, time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 # ── Paths ───────────────────────────────────────────────────────────────
@@ -94,7 +94,7 @@ def main():
 
     # Fetch all facts
     try:
-        facts = _supa_all_rows(select='id,text,stored_at,sector_path', page=500)
+        facts = _supa_all_rows(select='id,text,stored_at,sector_path,metadata', page=500)
     except Exception as e:
         print(f"❌ knowledge_maintenance: fetch failed: {e}")
         sys.exit(1)
@@ -129,7 +129,7 @@ def main():
 
         # Refresh facts list after deletion
         try:
-            facts = _supa_all_rows(select='id,text,stored_at,sector_path', page=500)
+            facts = _supa_all_rows(select='id,text,stored_at,sector_path,metadata', page=500)
         except Exception:
             pass
 
@@ -137,33 +137,69 @@ def main():
     unlabeled = [f for f in facts if not f.get('sector_path')]
     classified = 0
     abstained = 0
+    skipped = 0
+
+    def _recent_abstain(f):
+        # read lazily: a bad env value must not crash the import (storage.py imports this module)
+        try:
+            days = float(os.environ.get('SECTOR_RETRY_DAYS', '7'))  # an abstained row is not re-sent sooner
+        except ValueError:
+            days = 7
+        at = (f.get('metadata') or {}).get('sector_attempted_at')
+        try:
+            return datetime.now(timezone.utc) - datetime.fromisoformat(at) < timedelta(days=days)
+        except (TypeError, ValueError):
+            return False
+
+    def _patch(fact_id, body):
+        req = urllib.request.Request(
+            f'{url}/rest/v1/knowledge?id=eq.{fact_id}',
+            data=json.dumps(body).encode(), method='PATCH')
+        req.add_header('apikey', key)
+        req.add_header('Authorization', f'Bearer {key}')
+        req.add_header('Content-Type', 'application/json')
+        req.add_header('Prefer', 'return=minimal')
+        urllib.request.urlopen(req, timeout=10)
 
     if unlabeled:
         try:
             from knowledge.storage import _classify_sector  # Jev tree walk by default, centroid fallback
-            paths = [_classify_sector((f['text'] or '')[:1500]) for f in unlabeled]
+            todo = [f for f in unlabeled if not _recent_abstain(f)]
+            skipped = len(unlabeled) - len(todo)
+            paths = [_classify_sector((f['text'] or '')[:1500]) for f in todo]
 
-            updates = [(f['id'], p) for f, p in zip(unlabeled, paths) if p]
-            abstained = sum(1 for p in paths if not p)
+            updates = [(f['id'], {'sector_path': p}) for f, p in zip(todo, paths) if p]
+            abstain_ids = [f['id'] for f, p in zip(todo, paths) if not p]
+            # shortcut: cannot distinguish outage from abstain, so a wholly-abstained batch of 3+ is not marked;
+            # upgrade when _classify_sector reports errors distinctly.
+            note = ''
+            if not updates and len(todo) >= 3:
+                abstained, abstain_ids = len(abstain_ids), []
+                note = ' (not marked: whole batch abstained)'
 
-            for fact_id, path in updates:
-                payload = json.dumps({'sector_path': path}).encode()
-                req = urllib.request.Request(
-                    f'{url}/rest/v1/knowledge?id=eq.{fact_id}',
-                    data=payload, method='PATCH')
-                req.add_header('apikey', key)
-                req.add_header('Authorization', f'Bearer {key}')
-                req.add_header('Content-Type', 'application/json')
-                req.add_header('Prefer', 'return=minimal')
+            for fact_id, body in updates:
                 try:
-                    urllib.request.urlopen(req, timeout=10)
+                    _patch(fact_id, body)
                     classified += 1
+                except Exception as e:
+                    report.append(f"  backfill FAIL {fact_id[:8]}: {e}")
+
+            now = datetime.now(timezone.utc).isoformat()
+            for fact_id in abstain_ids:
+                try:
+                    # fresh metadata: the start-of-run snapshot may be minutes stale
+                    cur = _supa_select(f'select=metadata&id=eq.{fact_id}')
+                    if not cur:
+                        continue
+                    _patch(fact_id, {'metadata': {**(cur[0].get('metadata') or {}), 'sector_attempted_at': now}})
+                    abstained += 1
                 except Exception as e:
                     report.append(f"  backfill FAIL {fact_id[:8]}: {e}")
 
             if classified or abstained:
                 report.append(f"🏷  Backfill: {classified} classified, "
-                             f"{abstained} abstained "
+                             f"{abstained} abstained{note}, "
+                             f"{skipped} skipped (recent abstain) "
                              f"(of {len(unlabeled)} unlabeled)")
         except Exception as e:
             report.append(f"⚠️  Backfill skipped: {e}")

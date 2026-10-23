@@ -195,3 +195,26 @@ def test_callers_tag_digest_with_session_id(env, monkeypatch):
     monkeypatch.setattr(sd, 'store_digest', lambda d, tags=sd.TAGS: seen.append(tags) or True)
     sd.main()
     assert 'session:a' in seen[0].split(',')
+
+
+def _judge_sections():
+    return sd._select_items('t', '', ['keep a', 'drop b'], ['keep c'], [], [])
+
+
+def test_judge_prints_receipt_with_counts(monkeypatch, capsys):
+    from knowledge import jev
+    monkeypatch.setenv('DISTILL_JUDGE', 'true')
+    monkeypatch.setattr(jev, 'withheld', lambda t: t == 'keep c')
+    monkeypatch.setattr(jev, 'ask', lambda state, qs, timeout: {q: {'noul': 0.9 if 'keep' in qs[q]['instructions']['text'] else 0.1}
+                                                              for q in qs})
+    assert _judge_sections()[0] == ['keep a']
+    assert f'   judge: 2 scored, 1 dropped (< {jev.DISTILL_THRESHOLD}), 1 withheld' in capsys.readouterr().out
+
+
+def test_judge_failure_prints_fallback_receipt(monkeypatch, capsys):
+    from knowledge import jev
+    monkeypatch.setenv('DISTILL_JUDGE', 'true')
+    monkeypatch.setattr(jev, 'withheld', lambda t: False)
+    monkeypatch.setattr(jev, 'ask', lambda *a, **k: (_ for _ in ()).throw(TimeoutError('slow')))
+    assert _judge_sections()[0] == ['drop b', 'keep a']
+    assert '   judge: fallback (alphabetical) — TimeoutError' in capsys.readouterr().out

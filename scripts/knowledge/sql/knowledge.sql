@@ -20,7 +20,6 @@ create table if not exists public.knowledge (
 );
 
 create index if not exists idx_knowledge_metadata ON public.knowledge USING gin (metadata);
-create index if not exists knowledge_fts_idx ON public.knowledge USING gin (to_tsvector('english'::regconfig, text));
 create unique index if not exists knowledge_pkey ON public.knowledge USING btree (id);
 create index if not exists knowledge_priority_idx ON public.knowledge USING btree (priority);
 create index if not exists knowledge_source_idx ON public.knowledge USING btree (source);

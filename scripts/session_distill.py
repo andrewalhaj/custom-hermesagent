@@ -323,10 +323,14 @@ def _select_items(title, opener, decisions, outcomes, skipped, directives):
         scores = [[0.5] * len(items) for items in sections]
         for qid, (si, ii) in index.items():
             scores[si][ii] = float(answers[qid]["noul"])
-        return [[item for _, item in sorted(((s, it) for s, it in zip(sc, items) if s >= thr), key=lambda x: -x[0])]
+        kept = [[item for _, item in sorted(((s, it) for s, it in zip(sc, items) if s >= thr), key=lambda x: -x[0])]
                 for sc, items in zip(scores, sections)]
+        total = sum(len(items) for items in sections)
+        print(f"   judge: {len(index)} scored, {total - sum(map(len, kept))} dropped (< {thr}), {total - len(index)} withheld")
+        return kept
     except Exception as e:
         print(f"[session_distill] judge failed, alphabetical fallback: {e}", file=sys.stderr)
+        print(f"   judge: fallback (alphabetical) — {type(e).__name__}")
         return sections
 
 
