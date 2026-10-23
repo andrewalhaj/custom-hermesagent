@@ -100,3 +100,61 @@ def test_blocked_write_does_not_unblock_its_retry(vg):
     assert pre(mod, "write_file", path=str(f), content="y")["action"] == "block"
     mod.HOOKS["post_tool_call"](tool_name="write_file", args={"path": str(f), "content": "y"}, result=None, session_id="s1", status="blocked")
     assert pre(mod, "write_file", path=str(f), content="y")["action"] == "block"
+
+
+def sql_call(sql, name="mcp_supabase_execute_sql", key="query"):
+    return {"calls": [{"name": name, "arguments": {key: sql}}]}
+
+
+@pytest.mark.parametrize("sql,ident,how", [
+    ("ALTER TABLE items DROP COLUMN tags", "tags", "ALTER DROP COLUMN"),
+    ("alter table if exists public.items drop column if exists tags;", "tags", "ALTER DROP COLUMN"),
+    ("DROP INDEX IF EXISTS public.idx_items_tags", "idx_items_tags", "DROP INDEX"),
+    ("drop table foo", "foo", "DROP TABLE"),
+    ("DROP VIEW v_items", "v_items", "DROP VIEW"),
+    ("DROP FUNCTION public.f_items", "f_items", "DROP FUNCTION"),
+    ("TRUNCATE TABLE public.items", "items", "TRUNCATE"),
+    ("truncate items", "items", "TRUNCATE"),
+])
+def test_destructive_sql_blocks_until_grepped(vg, sql, ident, how):
+    mod, _ = vg
+    r = pre(mod, "tool_call", **sql_call(sql))
+    assert r["action"] == "block" and ident in r["message"] and f"grep -rn '{ident}' scripts plugins" in r["message"]
+    assert f'"how": "{how}"' in open(mod._LOG).read()
+    post(mod, "terminal", result="", command=f"grep -rn {ident} scripts plugins")
+    assert pre(mod, "tool_call", **sql_call(sql)) is None
+
+
+def test_apply_migration_accepts_sql_key(vg):
+    mod, _ = vg
+    r = pre(mod, "tool_call", **sql_call("DROP TABLE foo", name="apply_migration", key="sql"))
+    assert r["action"] == "block"
+
+
+@pytest.mark.parametrize("sql", ["SELECT tags FROM items", "DELETE FROM items WHERE id = 1"])
+def test_non_destructive_sql_passes(vg, sql):
+    mod, _ = vg
+    assert pre(mod, "tool_call", **sql_call(sql)) is None
+
+
+def test_psql_in_terminal_blocks(vg):
+    mod, _ = vg
+    assert pre(mod, "terminal", command='psql -c "drop table foo"')["action"] == "block"
+
+
+def test_grep_for_other_identifier_does_not_satisfy(vg):
+    mod, _ = vg
+    post(mod, "terminal", result="", command="grep -rn other scripts plugins")
+    assert pre(mod, "tool_call", **sql_call("DROP TABLE foo"))["action"] == "block"
+
+
+def test_grep_match_is_whole_word(vg):
+    mod, _ = vg
+    post(mod, "terminal", result="", command="grep -rn tag scripts plugins")
+    assert pre(mod, "tool_call", **sql_call("ALTER TABLE t DROP COLUMN tags"))["action"] == "block"
+
+
+def test_memory_search_satisfies_schema(vg):
+    mod, _ = vg
+    post(mod, "memory_search", result="", query="who uses foo")
+    assert pre(mod, "tool_call", **sql_call("DROP TABLE foo")) is None

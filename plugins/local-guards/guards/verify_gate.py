@@ -23,6 +23,14 @@ _CONTENT = re.compile(r"(?:\bsed\s+-i\S*\s+(?:'[^']*'|\"[^\"]*\"|\S+)\s+|\btee\s
 _EXIST = re.compile(r"\b(?:rm|mv|rmdir|unlink|chmod|chown)\s+(?:-\S+\s+)*(" + _PATH + r")(?:\s+(" + _PATH + "))?")
 _UNIT = re.compile(r"\bsystemctl\b(?:\s+--user)?\s+(?:restart|stop|disable|enable|mask|unmask|reset-failed)\s+(?:--\S+\s+)*([\w@.-]+)")
 _BRANCH = re.compile(r"\bgit\b[^;&|\n]*\bbranch\b[^;&|\n]*\s-[dD]\s+(\S+)")
+_NAME = r"((?:[\w$\"]+\.)*[\w$\"]+)"  # optionally schema-qualified/quoted
+_SQL = (  # (regex, how); DELETE FROM is out of scope: the table name is trivially greppable
+    (re.compile(r"\balter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?[\w$\".]+\s+drop\s+column\s+(?:if\s+exists\s+)?" + _NAME, re.I), "ALTER DROP COLUMN"),
+    *((re.compile(r"\bdrop\s+" + w + r"\s+(?:concurrently\s+)?(?:if\s+exists\s+)?" + _NAME, re.I), "DROP " + w.upper())
+      for w in ("table", "index", "function", "view")),
+    (re.compile(r"\btruncate\s+(?:table\s+)?(?:only\s+)?" + _NAME, re.I), "TRUNCATE"),
+)
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _RESULT_PATH = re.compile(r"(?<![\w-])(/(?:root|home)/[\w.@+-]+(?:/[\w.@+-]+)+)")
 _MAX_SESSIONS = 256
 _seen: dict[str, dict] = {}  # session_id -> {"read": targets named in a call's args, "listed": paths seen only in results}
@@ -38,6 +46,10 @@ def _in_scope(p: str) -> bool:
     return p.startswith(_ROOTS) and not p.startswith(_EXEMPT) and not os.path.basename(p).startswith("tmp")
 
 
+def _schema_targets(text: str) -> list[tuple[str, str, str]]:
+    return [("schema", m.replace('"', "").rsplit(".", 1)[-1].lower(), how) for rx, how in _SQL for m in rx.findall(text)]
+
+
 def _targets(tool_name: str, args: dict) -> list[tuple[str, str, str]]:
     """(kind, target, how) for every mutation this call performs."""
     out = []
@@ -45,8 +57,14 @@ def _targets(tool_name: str, args: dict) -> list[tuple[str, str, str]]:
         out.append(("content", _norm(str(args["path"])), tool_name))
     elif tool_name == "memory_remove" and args.get("fact_id"):
         out.append(("fact", str(args["fact_id"])[:8], tool_name))
+    elif tool_name == "tool_call":
+        for c in args.get("calls") or []:
+            if isinstance(c, dict) and str(c.get("name", "")).endswith(("execute_sql", "apply_migration")):
+                a = c.get("arguments") if isinstance(c.get("arguments"), dict) else {}
+                out += _schema_targets(" ".join(str(a.get(k) or "") for k in ("query", "sql")))
     elif tool_name in ("terminal", "execute_code"):
         text = str(args.get("command") or args.get("code") or "")
+        out += _schema_targets(text)
         out += [("content", _norm(m), "redirect/sed/tee") for m in _CONTENT.findall(text)]
         out += [("exist", _norm(m), "rm/mv") for pair in _EXIST.findall(text) for m in pair if m]
         out += [("unit", m, "systemctl") for m in _UNIT.findall(text)]
@@ -57,8 +75,8 @@ def _targets(tool_name: str, args: dict) -> list[tuple[str, str, str]]:
 
 
 def _verified(seen: dict, kind: str, target: str) -> bool:
-    if kind in ("fact", "unit", "branch"):
-        return target in seen["read"] or target in seen["listed"]
+    if kind in ("fact", "unit", "branch", "schema"):
+        return target in seen["read"] or (kind != "schema" and target in seen["listed"])
     if kind == "content":
         return not os.path.exists(target) or target in seen["read"]  # new file: nothing to read first
     p = target
@@ -87,7 +105,7 @@ def _on_pre_tool_call(tool_name: str = "", args=None, session_id: str = "", **_)
         a = args if isinstance(args, dict) else {}
         seen = _seen.get(session_id) or {"read": set(), "listed": set()}
         missing = [(k, t, how) for k, t, how in _targets(tool_name, a)
-                   if (k in ("fact", "unit", "branch") or _in_scope(t)) and not _verified(seen, k, t)]
+                   if (k in ("fact", "unit", "branch", "schema") or _in_scope(t)) and not _verified(seen, k, t)]
         if not missing:
             return None
         k, t, how = missing[0]
@@ -95,7 +113,8 @@ def _on_pre_tool_call(tool_name: str = "", args=None, session_id: str = "", **_)
         sys.stderr.write(f"[verify-gate] BLOCKED tool={tool_name} {k}={t} via {how} session={session_id}\n")
         hint = {"content": f"read_file('{t}') or cat/grep it", "exist": f"ls -la '{t}' (or its directory)",
                 "unit": f"systemctl --user status {t}", "branch": f"git branch --merged / git log -1 {t}",
-                "fact": f"memory_search returning id {t}"}[k]
+                "fact": f"memory_search returning id {t}",
+                "schema": f"grep -rn '{t}' scripts plugins — read every consumer before dropping it"}[k]
         return block(f"[VERIFY GATE] {tool_name} would change {t} ({how}) but nothing in this session has read it. "
                      f"Look first — {hint} — then retry. This gate has no arm/bypass.")
     except Exception as exc:  # optional tier: a guard bug lets the call through, visibly
@@ -124,6 +143,10 @@ def _on_post_tool_call(tool_name: str = "", args=None, result=None, session_id: 
                 seen.update(re.findall(r"\bgit\b[^;&|\n]*\b(?:log|show|cherry|branch)\b[^;&|\n]*?\s(?!-)([\w./-]+)", v))
         for k, t, _how in _targets(tool_name, a):
             seen.add(t)
+        # a grep/search naming an identifier is the read that unblocks a schema drop of it
+        look = (str(a.get("command") or a.get("code") or "") if re.search(r"\b(?:grep|rg)\b", str(a.get("command") or a.get("code") or ""))
+                else " ".join(str(a.get(k) or "") for k in ("query", "pattern")) if tool_name in ("memory_search", "search_files") else "")
+        seen.update(i.lower() for i in _IDENT.findall(look))
         text = result if isinstance(result, str) else json.dumps(result, default=str) if result is not None else ""
         if text:
             listed.update(_norm(m) for m in _RESULT_PATH.findall(text[:200_000]))
